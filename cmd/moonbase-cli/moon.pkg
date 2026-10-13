@@ -1,0 +1,8 @@
+import {
+  "Derk2006/moonbase/src/sql" @sql,
+  "Derk2006/moonbase/src/storage" @storage,
+  "Derk2006/moonbase/src/executor" @executor,
+  "Derk2006/moonbase/src/tx" @tx,
+}
+
+pkgtype(kind: "executable")
