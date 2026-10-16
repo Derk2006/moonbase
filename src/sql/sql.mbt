@@ -31,7 +31,8 @@ fn is_keyword(s : String) -> Bool {
   match s {
     "SELECT" | "FROM" | "WHERE" | "INSERT" | "INTO" | "VALUES"
     | "CREATE" | "TABLE" | "INT" | "DOUBLE" | "TEXT" | "BOOL"
-    | "NULL" | "PRIMARY" | "KEY" | "NOT" | "AND" | "OR" => true
+    | "NULL" | "PRIMARY" | "KEY" | "NOT" | "AND" | "OR"
+    | "DELETE" | "ORDER" | "BY" | "ASC" | "DESC" | "LIMIT" => true
     _ => false
   }
 }
@@ -210,7 +211,40 @@ fn parse_select(p : Parser) -> @types.Statement {
     ignore(advance(p))
     where_clause = Some(parse_expr(p))
   }
-  @types.Statement::Select(@types.SelectStmt::{ columns, table, where_clause })
+  let mut order_by : @types.OrderBy? = None
+  if match_keyword(p, "ORDER") {
+    ignore(advance(p))
+    expect_keyword(p, "BY")
+    let col = expect(p, TokenKind::IDENT).text
+    let mut desc = false
+    if match_keyword(p, "ASC") {
+      ignore(advance(p))
+    } else if match_keyword(p, "DESC") {
+      ignore(advance(p))
+      desc = true
+    }
+    order_by = Some(@types.OrderBy::{ column: col, desc })
+  }
+  let mut limit : Int? = None
+  if match_keyword(p, "LIMIT") {
+    ignore(advance(p))
+    let t = expect(p, TokenKind::NUMBER)
+    limit = Some(try @string.parse_int(t.text[:]) catch { _ => panic() })
+  }
+  @types.Statement::Select(@types.SelectStmt::{ columns, table, where_clause, order_by, limit })
+}
+
+/// 解析 DELETE FROM table [WHERE ...]
+fn parse_delete(p : Parser) -> @types.Statement {
+  ignore(expect(p, TokenKind::KEYWORD)) // DELETE
+  expect_keyword(p, "FROM")
+  let table = expect(p, TokenKind::IDENT).text
+  let mut where_clause : @types.Expr? = None
+  if match_keyword(p, "WHERE") {
+    ignore(advance(p))
+    where_clause = Some(parse_expr(p))
+  }
+  @types.Statement::Delete(@types.DeleteStmt::{ table, where_clause })
 }
 
 fn expect_keyword(p : Parser, kw : String) -> Unit {
@@ -301,6 +335,7 @@ pub fn parse(sql : String) -> @types.Statement? {
     "SELECT" => parse_select(p)
     "INSERT" => parse_insert(p)
     "CREATE" => parse_create(p)
+    "DELETE" => parse_delete(p)
     _ => return None
   }
   Some(stmt)
