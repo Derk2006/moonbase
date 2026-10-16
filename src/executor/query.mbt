@@ -47,6 +47,27 @@ fn compare_nums(a : Double, b : Double, op : @types.Op) -> Bool {
   }
 }
 
+/// 字符串字典序比较（逐码点）。
+/// 注意：标准库的 `String::compare` 是「先比长度再比字典序」，不符合 SQL 语义，
+/// 因此这里显式逐字符比较码点，长度相同时才以长度定序。
+pub fn text_compare(a : String, b : String) -> Int {
+  let ca = a.to_array()
+  let cb = b.to_array()
+  let na = ca.length()
+  let nb = cb.length()
+  let n = if na < nb { na } else { nb }
+  let mut i = 0
+  while i < n {
+    let x = ca[i].to_int()
+    let y = cb[i].to_int()
+    if x != y {
+      return if x < y { -1 } else { 1 }
+    }
+    i = i + 1
+  }
+  if na == nb { 0 } else if na < nb { -1 } else { 1 }
+}
+
 /// 三路比较：负数表示 a < b，支持跨数值类型比较
 pub fn compare_values(a : @types.Value, b : @types.Value) -> Int {
   let ra = value_rank(a)
@@ -56,8 +77,7 @@ pub fn compare_values(a : @types.Value, b : @types.Value) -> Int {
   }
   match (a, b) {
     (@types.Value::Null, @types.Value::Null) => 0
-    (@types.Value::TextVal(x), @types.Value::TextVal(y)) =>
-      if x == y { 0 } else if x < y { -1 } else { 1 }
+    (@types.Value::TextVal(x), @types.Value::TextVal(y)) => text_compare(x, y)
     (@types.Value::BoolVal(x), @types.Value::BoolVal(y)) =>
       if x == y { 0 } else if !x { -1 } else { 1 }
     _ => {
@@ -108,10 +128,10 @@ pub fn eval_expr(expr : @types.Expr, row : @types.Row, schema : @types.TableSche
         (@types.Value::TextVal(a), @types.Value::TextVal(b)) => match op {
           @types.Op::Eq => a == b
           @types.Op::Ne => a != b
-          @types.Op::Lt => a < b
-          @types.Op::Le => a <= b
-          @types.Op::Gt => a > b
-          @types.Op::Ge => a >= b
+          @types.Op::Lt => text_compare(a, b) < 0
+          @types.Op::Le => text_compare(a, b) <= 0
+          @types.Op::Gt => text_compare(a, b) > 0
+          @types.Op::Ge => text_compare(a, b) >= 0
         }
         _ => false
       }
