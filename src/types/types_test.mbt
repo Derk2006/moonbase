@@ -40,5 +40,8 @@ test "Expr construction" {
     @types.Expr::ColumnRef("id"),
     @types.Expr::Literal(@types.Value::IntVal(1))
   )
-  assert_true(true) // 结构构造成功即可
+  match expr {
+    @types.Expr::Binary(op, _, _) => assert_true(op == @types.Op::Eq)
+    _ => panic()
+  }
 }

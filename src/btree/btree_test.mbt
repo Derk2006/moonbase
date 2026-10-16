@@ -3,7 +3,7 @@ test "BTree insert and get" {
   let row = @types.Row::{ values: [@types.Value::IntVal(1), @types.Value::TextVal("Alice")] }
   tree.insert(1, row)
   let got = tree.get(1)
-  assert_true(got.is_some())
+  assert_true(got is Some(_))
   assert_eq(got.unwrap().values[1], @types.Value::TextVal("Alice"))
 }
 
@@ -16,7 +16,7 @@ test "BTree multiple inserts" {
   assert_eq(tree.all_keys().length(), 10)
   for i = 1; i <= 10; i = i + 1 {
     let got = tree.get(i)
-    assert_true(got.is_some())
+    assert_true(got is Some(_))
   }
 }
 
@@ -37,6 +37,6 @@ test "BTree split stress test" {
     tree.insert(i, row)
   }
   assert_eq(tree.all_keys().length(), 100)
-  assert_true(tree.get(50).is_some())
-  assert_true(tree.get(99).is_some())
+  assert_true(tree.get(50) is Some(_))
+  assert_true(tree.get(99) is Some(_))
 }

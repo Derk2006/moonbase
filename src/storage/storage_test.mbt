@@ -26,7 +26,7 @@ test "Storage select by key" {
   ignore(storage.insert("users", @types.Row::{ values: [@types.Value::IntVal(1), @types.Value::TextVal("Alice")] }))
   ignore(storage.insert("users", @types.Row::{ values: [@types.Value::IntVal(2), @types.Value::TextVal("Bob")] }))
   let got = storage.select_by_key("users", 2)
-  assert_true(got.is_some())
+  assert_true(got is Some(_))
   assert_eq(got.unwrap().values[1], @types.Value::TextVal("Bob"))
 }
 

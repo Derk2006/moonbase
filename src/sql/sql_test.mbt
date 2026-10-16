@@ -5,7 +5,7 @@ test "tokenize SELECT" {
 
 test "parse CREATE TABLE" {
   let stmt = @sql.parse("CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL)")
-  assert_true(stmt.is_some())
+  assert_true(stmt is Some(_))
   match stmt.unwrap() {
     @types.Statement::Create(c) => {
       assert_eq(c.table, "users")
@@ -21,7 +21,7 @@ test "parse CREATE TABLE" {
 
 test "parse INSERT" {
   let stmt = @sql.parse("INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob')")
-  assert_true(stmt.is_some())
+  assert_true(stmt is Some(_))
   match stmt.unwrap() {
     @types.Statement::Insert(i) => {
       assert_eq(i.table, "users")
@@ -34,12 +34,12 @@ test "parse INSERT" {
 
 test "parse SELECT with WHERE" {
   let stmt = @sql.parse("SELECT id, name FROM users WHERE id = 1")
-  assert_true(stmt.is_some())
+  assert_true(stmt is Some(_))
   match stmt.unwrap() {
     @types.Statement::Select(s) => {
       assert_eq(s.table, "users")
       assert_eq(s.columns.length(), 2)
-      assert_true(s.where_clause.is_some())
+      assert_true(s.where_clause is Some(_))
     }
     _ => panic()
   }
@@ -47,7 +47,7 @@ test "parse SELECT with WHERE" {
 
 test "parse SELECT star" {
   let stmt = @sql.parse("SELECT * FROM users")
-  assert_true(stmt.is_some())
+  assert_true(stmt is Some(_))
   match stmt.unwrap() {
     @types.Statement::Select(s) => {
       assert_eq(s.columns[0], "*")
