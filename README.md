@@ -40,9 +40,10 @@ moonbase/
 | **Executor** | Column-name resolution against the schema | ✅ |
 | **Executor** | `DELETE FROM t [WHERE ...]` (index rebuild) | ✅ |
 | **Executor** | Mixed-type comparison (Int / Double / Text / Bool / Null) | ✅ |
+| **Executor** | Code-point-wise text comparison (see note below) | ✅ |
 | **Tx** | `BEGIN` / `COMMIT` / `ROLLBACK` | ✅ |
 | **Tx** | Write-ahead log (in-memory) | ✅ |
-| **Tests** | 31 unit tests across all packages | ✅ |
+| **Tests** | 35 unit tests across all packages | ✅ |
 
 ## Repository
 
@@ -103,9 +104,17 @@ Deleted 1 row(s) from 'users'.
 - **Zero external dependencies**: Pure MoonBit, no FFI to SQLite or other engines
 - **B-tree from scratch**: Leaf/internal node splitting, leaf-level linked list for range scans
 - **Type-safe SQL AST**: `Statement` enum with `Select`/`Insert`/`Create`/`Delete` variants
-- **Schema-aware executor**: column references resolve by name, projection is a real index remap
+- **Schema-aware evaluation**: `src/executor/query.mbt` resolves column references by name, so
+  predicates and ORDER BY work on any column — not just the primary key
 - **Reindex-on-write**: DELETE rebuilds the primary-key B-tree so point lookups stay consistent
-- **Composable executor**: `Executor` takes a `Statement` and returns a `Result`; easy to extend
+
+## Note on text ordering
+
+The MoonBit standard library orders strings by **length first**, then lexicographically
+(`"Alice".compare("Bob") == 1`). That contradicts SQL semantics, where `'Alice' < 'Bob'`.
+MoonBase therefore implements its own code-point-wise comparison
+(`@executor.text_compare`) and uses it for text predicates and `ORDER BY`, with regression
+tests covering the difference.
 
 ## License
 

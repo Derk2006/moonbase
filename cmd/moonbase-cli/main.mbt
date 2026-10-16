@@ -14,7 +14,11 @@ fn main {
     "CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL)",
     "INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')",
     "SELECT * FROM users",
-    "SELECT * FROM users WHERE id = 2",
+    "SELECT name FROM users WHERE id = 2",
+    "SELECT * FROM users ORDER BY name DESC",
+    "SELECT * FROM users ORDER BY id LIMIT 2",
+    "DELETE FROM users WHERE id = 2",
+    "SELECT * FROM users",
   ]
 
   for sql in demo_statements {
