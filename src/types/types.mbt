@@ -61,6 +61,20 @@ pub(all) struct SelectStmt {
   columns : Array[String]
   table : String
   where_clause : Expr?
+  order_by : OrderBy?
+  limit : Int?
+} derive(Debug, Eq)
+
+/// 排序方式（ORDER BY 子句）
+pub(all) struct OrderBy {
+  column : String
+  desc : Bool
+} derive(Debug, Eq)
+
+/// DELETE 语句
+pub(all) struct DeleteStmt {
+  table : String
+  where_clause : Expr?
 } derive(Debug, Eq)
 
 /// INSERT 语句
@@ -81,4 +95,5 @@ pub(all) enum Statement {
   Select(SelectStmt);
   Insert(InsertStmt);
   Create(CreateStmt);
+  Delete(DeleteStmt);
 } derive(Debug, Eq)
