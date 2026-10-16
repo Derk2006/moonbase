@@ -2,7 +2,7 @@
 
 pub(all) struct Table {
   schema : @types.TableSchema
-  data : @btree.BTree  // 主键索引（假设主键是 Int）
+  mut data : @btree.BTree  // 主键索引（假设主键是 Int）
   rows : Array[@types.Row]  // 全量数据（用于无索引扫描）
 }
 
@@ -78,4 +78,27 @@ pub fn Storage::table_names(self : Storage) -> Array[String] {
     names.push(name)
   }
   names
+}
+
+/// 用新的行集合替换表中全部数据，并重建主键索引。
+/// DELETE 语义下由执行器先算好保留集，再调用本方法。
+pub fn Storage::replace_rows(self : Storage, table_name : String, rows : Array[@types.Row]) -> Bool {
+  match self.tables.get(table_name) {
+    Some(table) => {
+      table.rows.clear()
+      let rebuilt = @btree.BTree::new(order=8)
+      for row in rows {
+        table.rows.push(row)
+        if row.values.length() > 0 {
+          match row.values[0] {
+            @types.Value::IntVal(key) => { rebuilt.insert(key, row) }
+            _ => ()
+          }
+        }
+      }
+      table.data = rebuilt
+      true
+    }
+    None => false
+  }
 }
