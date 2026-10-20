@@ -1,10 +1,29 @@
-# MoonBase
+# MoonBase — Pure-MoonBit SQLite File-Format Reader
 
-**A lightweight embedded database kernel written in MoonBit.**
+**A zero-FFI, byte-level reader/writer for the real SQLite database file format (version 3), written entirely in MoonBit.**
 
-MoonBase is a from-scratch embedded SQL database engine implementing core relational database concepts: recursive-descent SQL parser, B-tree storage engine with range scans, query executor with WHERE evaluation, ORDER BY / LIMIT, DELETE with index rebuild, and transaction support via write-ahead logging.
+MoonBase does **not** reimplement a database engine. Instead it speaks the SQLite
+on-disk binary format *directly* — the same `.db` files produced by the official
+`sqlite3` tool. It parses database headers, B-tree pages, record serial types and
+the `sqlite_master` schema, then answers read-only SQL queries against existing
+database files. There is **no FFI** to `libsqlite3` and **no custom storage
+format** — MoonBase is a *format interop layer*, not another engine.
 
-This project demonstrates that MoonBit is capable of systems programming traditionally done in C/Rust — memory-safe database kernels with predictable performance.
+> Pivot note: the project originally started as a from-scratch embedded SQL
+> engine (see git history, 22 early commits). After review feedback about
+> overlap with existing pure-MoonBit engines, it was redirected to the concrete,
+> well-specified SQLite file-format compatibility problem, which is verifiable
+> byte-for-byte against the reference implementation.
+
+---
+
+## Why this direction
+
+| Reviewer concern | How MoonBase answers it |
+|---|---|
+| **Compatibility target too vague** | The target is precisely the *SQLite Database File Format, version 3* — a documented, versioned binary format (header magic `SQLite format 3\0`, `schema_format` 1–4, `text_encoding` UTF-8/16). We verify against real `sqlite3` output. |
+| **Transaction / persistence boundary unclear** | MoonBase is **read-only** over committed pages. It does not implement WAL, rollback or durability — so there is no ambiguous persistence claim. The boundary is crisp: parse committed pages, answer queries. |
+| **Overlap with existing engines** | Unlike FFI bindings (`sqlite3.mbt`, which shells out to the C library) we use **zero FFI**. Unlike self-format engines (`otter`/`moonlake`, which invent their own file layout) we target the *industry-standard* SQLite format. We are an interop layer, not a competing engine. |
 
 ---
 
@@ -12,109 +31,96 @@ This project demonstrates that MoonBit is capable of systems programming traditi
 
 ```
 moonbase/
-├── src/
-│   ├── types/     Core type system (DataType, Value, Row, Column, Expr, Statement)
-│   ├── sql/       Hand-written recursive-descent SQL parser (tokenizer + parser)
-│   ├── btree/     B-tree index engine (insert, point lookup, range scan, node splitting)
-│   ├── storage/   Table manager (schema + B-tree index + row store)
-│   ├── executor/  Query executor (CREATE, INSERT, SELECT, DELETE, projection, sort)
-│   └── tx/        Transaction manager (BEGIN, COMMIT, ROLLBACK with WAL)
-└── cmd/moonbase-cli/  CLI demo
+├── src/sqlite/            Pure-MoonBit SQLite file-format layer (zero FFI)
+│   ├── value.mbt          Value model, DbError, SQLite collation (NULL<num<text<blob)
+│   ├── varint.mbt         SQLite varint encode/decode (7-bit groups, ≤9 bytes)
+│   ├── pager.mbt          100-byte DB header + page slicing / usable size
+│   ├── record.mbt         Record serial types: int(1..6), float64, text(UTF-8/16), blob, const 0/1
+│   ├── btree_file.mbt     B-tree page parse (leaf/interior table & index), overflow chains
+│   ├── lexer.mbt          Tolerant DDL lexer for schema text inside the file
+│   ├── schema.mbt         sqlite_master scan + CREATE TABLE parser (rowid alias, WITHOUT ROWID)
+│   ├── db.mbt             Db facade: open, table lookup, row materialisation
+│   ├── query.mbt          Read-only SELECT: projection, COUNT(*), WHERE, ORDER BY, LIMIT (3-valued logic)
+│   └── value_wbtest.mbt   10 unit tests
+└── cmd/moonbase-cli/      CLI demo (js backend; Node fs for real file I/O)
 ```
 
 ## Features
 
 | Component | Feature | Status |
 |---|---|---|
-| **SQL Parser** | `CREATE TABLE`, `INSERT`, `SELECT`, `DELETE` | ✅ |
-| **SQL Parser** | `WHERE` with `= <> < <= > >= AND OR` | ✅ |
-| **SQL Parser** | `ORDER BY <col> [ASC\|DESC]`, `LIMIT n` | ✅ |
-| **SQL Parser** | Multi-row `INSERT ... VALUES (...), (...)` | ✅ |
-| **Storage** | B-tree index (order-4 to order-N configurable) | ✅ |
-| **Storage** | Point lookup by primary key | ✅ |
-| **Storage** | Range scan `[start, end]` | ✅ |
-| **Storage** | Node splitting (leaf + internal) | ✅ |
-| **Storage** | `replace_rows` — rebuilds the primary index after DELETE | ✅ |
-| **Executor** | Full-table `SELECT *` | ✅ |
-| **Executor** | Column projection `SELECT col1, col2` | ✅ |
-| **Executor** | Column-name resolution against the schema | ✅ |
-| **Executor** | `DELETE FROM t [WHERE ...]` (index rebuild) | ✅ |
-| **Executor** | Mixed-type comparison (Int / Double / Text / Bool / Null) | ✅ |
-| **Executor** | Code-point-wise text comparison (see note below) | ✅ |
-| **Tx** | `BEGIN` / `COMMIT` / `ROLLBACK` | ✅ |
-| **Tx** | Write-ahead log (in-memory) | ✅ |
-| **Tests** | 35 unit tests across all packages | ✅ |
+| **Header** | 100-byte header: page_size (1→65536), versions, encodings, schema_cookie, sqlite_version | ✅ |
+| **Varint** | Decode + encode, 9-byte edge case (`1<<56`) round-trips | ✅ |
+| **Record** | Serial types 0/1–6/7/8/9, signed ints, float64, UTF-8 & UTF-16 text, BLOB | ✅ |
+| **B-tree** | leaf-table / interior-table / leaf-index / interior-index; local-payload formula; overflow chains with cycle guard | ✅ |
+| **Schema** | `sqlite_master` scan; `CREATE TABLE` parser tolerant of constraints; `INTEGER PRIMARY KEY` → rowid alias; `WITHOUT ROWID` | ✅ |
+| **Query** | `SELECT *`, column projection + `AS`, `COUNT(*)`, `WHERE` (`= <> < <= > >= AND OR NOT IS [NOT] NULL`), `ORDER BY … ASC|DESC`, `LIMIT` | ✅ |
+| **Collation** | Code-point-wise text compare (matches SQLite, *not* MoonBit's length-first order) | ✅ |
+| **FFI** | **None** — pure MoonBit, cross-compiles to js / wasm / native | ✅ |
+| **Tests** | 10 unit tests; verified against official `sqlite3` fixtures | ✅ |
 
 ## Repository
 
-- GitHub（主仓库）：https://github.com/Derk2006/moonbase
-- 码云 Gitee（镜像）：https://gitee.com/EchoDerk/moonbase
+- GitHub (primary): https://github.com/Derk2006/moonbase
+- Gitee (mirror): https://gitee.com/EchoDerk/moonbase
 
 ## Quick Start
 
 ```bash
-# Run the test suite
+# Run the test suite (works on default backend — no FFI needed)
 moon test
 
-# Build the CLI demo (JavaScript backend, runs on Node.js)
-moon build --target js cmd/moonbase-cli
+# Build the CLI demo (JavaScript backend, runs on Node.js — real file I/O via Node fs)
+moon build --target js
 node _build/js/debug/build/cmd/moonbase-cli/moonbase-cli.js
 
-# WebAssembly backend is also supported
-moon build --target wasm cmd/moonbase-cli
+# Build for other backends (CLI uses a stub there; the library is fully cross-target)
+moon build            # default backend, builds & tests clean
 ```
 
-## Example
-
-```sql
-CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL);
-INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie');
-
-SELECT name FROM users WHERE id = 2;
--- name
--- Bob
--- (1 row)
-
-SELECT * FROM users ORDER BY name DESC LIMIT 2;
--- id    name
--- 3     Charlie
--- 1     Alice
--- (2 row(s))
-
-DELETE FROM users WHERE id = 2;
--- Deleted 1 row(s) from 'users'.
-```
-
-## CLI demo output
+### CLI usage
 
 ```
-> SELECT * FROM users ORDER BY name DESC
-id	name
-3	Charlie
-1	Alice
-2	Bob
-(3 row(s))
-
-> DELETE FROM users WHERE id = 2
-Deleted 1 row(s) from 'users'.
+moonbase-cli header <file.db>               print the 100-byte database header
+moonbase-cli schema <file.db>               list tables / indexes / columns
+moonbase-cli tree   <file.db> <table>       show the table B-tree root + row count
+moonbase-cli query  <file.db> "SELECT ..."  run a read-only query
+moonbase-cli dump   <file.db> <table>       export the whole table (pipe-separated)
 ```
 
-## Design Highlights
+## Example (against a real `sqlite3`-generated file)
 
-- **Zero external dependencies**: Pure MoonBit, no FFI to SQLite or other engines
-- **B-tree from scratch**: Leaf/internal node splitting, leaf-level linked list for range scans
-- **Type-safe SQL AST**: `Statement` enum with `Select`/`Insert`/`Create`/`Delete` variants
-- **Schema-aware evaluation**: `src/executor/query.mbt` resolves column references by name, so
-  predicates and ORDER BY work on any column — not just the primary key
-- **Reindex-on-write**: DELETE rebuilds the primary-key B-tree so point lookups stay consistent
+```bash
+# create a fixture with the official tool
+python -c "import sqlite3; c=sqlite3.connect('demo.db'); \
+  c.execute('create table t(id integer primary key, name text, score real)'); \
+  c.executemany('insert into t values(?,?,?)', [(1,'Alice',91.5),(2,'Bob',88.0),(3,'陈小明',77.25)]); \
+  c.commit()"
 
-## Note on text ordering
+node _build/js/debug/build/cmd/moonbase-cli/moonbase-cli.js schema demo.db
+# table t (root=2, 3 列)
+#     id  integer  [INTEGER PRIMARY KEY -> rowid 别名]
+#     name  text
+#     score  real
 
-The MoonBit standard library orders strings by **length first**, then lexicographically
-(`"Alice".compare("Bob") == 1`). That contradicts SQL semantics, where `'Alice' < 'Bob'`.
-MoonBase therefore implements its own code-point-wise comparison
-(`@executor.text_compare`) and uses it for text predicates and `ORDER BY`, with regression
-tests covering the difference.
+node _build/js/debug/build/cmd/moonbase-cli/moonbase-cli.js query demo.db \
+  "SELECT name, score FROM t WHERE score > 80 ORDER BY score DESC"
+# name|score
+# Alice|91.5
+# Bob|88
+```
+
+The output matches the official `sqlite3` CLI exactly.
+
+## Verification methodology
+
+1. Generate fixtures with the **official** `sqlite3` (via Python's `sqlite3` module) across
+   page sizes, encodings and schemas.
+2. Parse the same files with MoonBase and compare header fields, schema and dumped rows
+   **byte-for-byte** with `sqlite3` output.
+3. Unit tests cover the tricky format corners: 9-byte varint (`2^56`), signed-integer
+   serial types, float64, UTF-8/16 text, BLOB, the NULL<number<text<BLOB ordering, and
+   code-point text collation.
 
 ## License
 

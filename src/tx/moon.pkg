@@ -1,4 +1,0 @@
-import {
-  "Derk2006/moonbase/src/types" @types,
-  "Derk2006/moonbase/src/storage" @storage,
-}

@@ -1,8 +1,15 @@
 import {
-  "Derk2006/moonbase/src/sql" @sql,
-  "Derk2006/moonbase/src/storage" @storage,
-  "Derk2006/moonbase/src/executor" @executor,
-  "Derk2006/moonbase/src/tx" @tx,
+  "Derk2006/moonbase/src/sqlite" @sqlite,
+  "moonbitlang/core/env" @env,
 }
 
 pkgtype(kind: "executable")
+
+// read_file 的实现按后端区分：js 后端用 Node fs 读真实文件，
+// 其余后端用占位实现，保证 `moon build` 在默认后端也能编译通过。
+options(
+  targets: {
+    "read_file_js.mbt": [ "js" ],
+    "read_file_other.mbt": [ "native", "llvm", "wasm", "wasm-gc" ],
+  },
+)
