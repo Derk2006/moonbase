@@ -6,3 +6,9 @@ fn read_file(_path : String) -> Bytes {
     "read_file 仅在 js 后端（node）下可用；请用 `moon build --target js` 构建后通过 node 运行",
   )
 }
+
+fn write_file(_path : String, _data : Bytes) -> Unit {
+  abort(
+    "write_file 仅在 js 后端（node）下可用；请用 `moon build --target js` 构建后通过 node 运行",
+  )
+}

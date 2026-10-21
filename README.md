@@ -1,13 +1,15 @@
-# MoonBase — Pure-MoonBit SQLite File-Format Reader
+# MoonBase — Pure-MoonBit SQLite File-Format Reader & Writer
 
-**A zero-FFI, byte-level reader/writer for the real SQLite database file format (version 3), written entirely in MoonBit.**
+**A zero-FFI, byte-level reader *and* writer for the real SQLite database file format (version 3), written entirely in MoonBit.**
 
 MoonBase does **not** reimplement a database engine. Instead it speaks the SQLite
 on-disk binary format *directly* — the same `.db` files produced by the official
-`sqlite3` tool. It parses database headers, B-tree pages, record serial types and
-the `sqlite_master` schema, then answers read-only SQL queries against existing
-database files. There is **no FFI** to `libsqlite3` and **no custom storage
-format** — MoonBase is a *format interop layer*, not another engine.
+`sqlite3` tool. It can **both** parse existing database files (headers, B-tree
+pages, record serial types, the `sqlite_master` schema, schema-aware read-only
+SQL queries) **and** *generate* brand-new `.db` files from scratch in pure
+MoonBit — no FFI, no C library, no private storage format. The writer is the
+inverse of the parser and reuses it for self-verification. MoonBase is a
+*format interop layer*, not another engine.
 
 > Pivot note: the project originally started as a from-scratch embedded SQL
 > engine (see git history, 22 early commits). After review feedback about
@@ -21,9 +23,9 @@ format** — MoonBase is a *format interop layer*, not another engine.
 
 | Reviewer concern | How MoonBase answers it |
 |---|---|
-| **Compatibility target too vague** | The target is precisely the *SQLite Database File Format, version 3* — a documented, versioned binary format (header magic `SQLite format 3\0`, `schema_format` 1–4, `text_encoding` UTF-8/16). We verify against real `sqlite3` output. |
-| **Transaction / persistence boundary unclear** | MoonBase is **read-only** over committed pages. It does not implement WAL, rollback or durability — so there is no ambiguous persistence claim. The boundary is crisp: parse committed pages, answer queries. |
-| **Overlap with existing engines** | Unlike FFI bindings (`sqlite3.mbt`, which shells out to the C library) we use **zero FFI**. Unlike self-format engines (`otter`/`moonlake`, which invent their own file layout) we target the *industry-standard* SQLite format. We are an interop layer, not a competing engine. |
+| **Compatibility target too vague** | The target is precisely the *SQLite Database File Format, version 3* — a documented, versioned binary format (header magic `SQLite format 3\0`, `schema_format` 1–4, `text_encoding` UTF-8/16). We verify against real `sqlite3` output, and our writer's output opens in the official `sqlite3`. |
+| **Transaction / persistence boundary unclear** | MoonBase is a *format* tool. The reader operates over committed pages (no WAL/rollback/durability). The writer *materialises* a fresh, fully-committed single-file database in one pass — there is no half-written state and no durability claim. The boundary is crisp. |
+| **Overlap with existing engines** | Unlike FFI bindings (`sqlite3.mbt`, which shells out to the C library) we use **zero FFI**. Unlike self-format engines (`otter`/`moonlake`, which invent their own file layout) we target the *industry-standard* SQLite format. Unlike the pure-MoonBit read-only inspector `prowk/MoonSQLiteFile` (which explicitly states it does *not* write files / does not run SQL) MoonBase is **write-capable** — generating valid `.db` files is our headline non-overlapping contribution. We are an interop layer, not a competing engine. |
 
 ---
 
@@ -41,7 +43,9 @@ moonbase/
 │   ├── schema.mbt         sqlite_master scan + CREATE TABLE parser (rowid alias, WITHOUT ROWID)
 │   ├── db.mbt             Db facade: open, table lookup, row materialisation
 │   ├── query.mbt          Read-only SELECT: projection, COUNT(*), WHERE, ORDER BY, LIMIT (3-valued logic)
-│   └── value_wbtest.mbt   10 unit tests
+│   ├── writer.mbt         **Writer**: make_db / make_demo_db — generate valid .db from scratch (header, leaf/interior table B-trees, records, overflow chains, sqlite_master)
+│   ├── value_wbtest.mbt   10 reader unit tests
+│   └── writer_wbtest.mbt  5 writer round-trip tests (small table, float64, overflow, multi-leaf interior, multi-table)
 └── cmd/moonbase-cli/      CLI demo (js backend; Node fs for real file I/O)
 ```
 
@@ -56,8 +60,9 @@ moonbase/
 | **Schema** | `sqlite_master` scan; `CREATE TABLE` parser tolerant of constraints; `INTEGER PRIMARY KEY` → rowid alias; `WITHOUT ROWID` | ✅ |
 | **Query** | `SELECT *`, column projection + `AS`, `COUNT(*)`, `WHERE` (`= <> < <= > >= AND OR NOT IS [NOT] NULL`), `ORDER BY … ASC|DESC`, `LIMIT` | ✅ |
 | **Collation** | Code-point-wise text compare (matches SQLite, *not* MoonBit's length-first order) | ✅ |
+| **Writer** | `make_db(Tables)` materialises a valid `.db` **from scratch** in pure MoonBit: 100-byte header, leaf/interior table B-trees, records, overflow-page chains, `sqlite_master` rows; `INTEGER PRIMARY KEY` rowid aliasing, auto rowid, multi-table. Output re-opens in official `sqlite3`. | ✅ |
 | **FFI** | **None** — pure MoonBit, cross-compiles to js / wasm / native | ✅ |
-| **Tests** | 10 unit tests; verified against official `sqlite3` fixtures | ✅ |
+| **Tests** | 15 unit tests (10 reader + 5 writer round-trip); writer output verified re-readable by the in-tree reader **and** by official `sqlite3` fixtures | ✅ |
 
 ## Repository
 
@@ -86,6 +91,7 @@ moonbase-cli schema <file.db>               list tables / indexes / columns
 moonbase-cli tree   <file.db> <table>       show the table B-tree root + row count
 moonbase-cli query  <file.db> "SELECT ..."  run a read-only query
 moonbase-cli dump   <file.db> <table>       export the whole table (pipe-separated)
+moonbase-cli make   <out.db>                generate a legal .db from scratch (pure MoonBit writer)
 ```
 
 ## Example (against a real `sqlite3`-generated file)
@@ -114,6 +120,7 @@ The output matches the official `sqlite3` CLI exactly.
 
 ## Verification methodology
 
+**Reader side**
 1. Generate fixtures with the **official** `sqlite3` (via Python's `sqlite3` module) across
    page sizes, encodings and schemas.
 2. Parse the same files with MoonBase and compare header fields, schema and dumped rows
@@ -121,6 +128,35 @@ The output matches the official `sqlite3` CLI exactly.
 3. Unit tests cover the tricky format corners: 9-byte varint (`2^56`), signed-integer
    serial types, float64, UTF-8/16 text, BLOB, the NULL<number<text<BLOB ordering, and
    code-point text collation.
+
+**Writer side (the headline contribution — generation, not just parsing)**
+1. `make_db(...)` produces a `.db` **from scratch** (no `sqlite3` involved in creation).
+2. The *same* in-tree parser re-opens the generated bytes and asserts every value decodes
+   exactly (round-trip). This is `writer_wbtest.mbt`.
+3. The generated file is then opened by the **official** `sqlite3` and queried — proving it
+   is a *real* SQLite database, not a private format. Verified across: small tables, exact
+   IEEE-754 float64 round-trip (incl. `-0.125`, `π`, `0.0`), >4 KB overflow-page chains,
+   300-row trees that force a leaf→interior-page upgrade, and multiple tables in one file.
+
+## Example — generate a `.db` with the pure-MoonBit writer
+
+```bash
+# Build the CLI (js backend) and generate a legal .db from scratch
+moon build --target js
+node _build/js/debug/build/cmd/moonbase-cli/moonbase-cli.js make demo_out.db
+# generated demo_out.db (users: id INTEGER PK, name TEXT, score REAL, memo BLOB)
+
+# (a) the in-tree reader can read it back
+node _build/js/debug/build/cmd/moonbase-cli/moonbase-cli.js query demo_out.db \
+  "SELECT name, score FROM users ORDER BY score DESC"
+
+# (b) the OFFICIAL sqlite3 can open it too — proof it is a real SQLite file
+python -c "import sqlite3; c=sqlite3.connect('demo_out.db'); \
+  print(c.execute('SELECT name, score FROM users ORDER BY score DESC').fetchall())"
+```
+
+The writer output is byte-compatible with the SQLite format spec, so any tool that
+speaks SQLite — including the reference `sqlite3` — can consume it.
 
 ## License
 

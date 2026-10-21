@@ -1,4 +1,4 @@
-/// moonbase-cli：直接打开真实的 SQLite 数据库文件
+/// moonbase-cli：直接打开 / 生成真实的 SQLite 数据库文件
 ///
 /// 用法：
 ///   moonbase-cli header <file.db>              打印文件头
@@ -6,9 +6,10 @@
 ///   moonbase-cli tree   <file.db> <table>      打印表 B 树结构
 ///   moonbase-cli query  <file.db> "<sql>"      执行只读查询
 ///   moonbase-cli dump   <file.db> <table>      导出整表（竖线分隔）
+///   moonbase-cli make   <out.db>               用纯 MoonBit 生成一份合法 .db
 
 fn usage() -> Unit {
-  println("MoonBase —— 纯 MoonBit 实现的 SQLite 文件格式读取器")
+  println("MoonBase —— 纯 MoonBit 实现的 SQLite 文件格式读取 / 生成器")
   println("")
   println("用法：")
   println("  moonbase-cli header <file.db>")
@@ -16,6 +17,7 @@ fn usage() -> Unit {
   println("  moonbase-cli tree   <file.db> <table>")
   println("  moonbase-cli query  <file.db> \"SELECT ...\"")
   println("  moonbase-cli dump   <file.db> <table>")
+  println("  moonbase-cli make   <out.db>              用纯 MoonBit 生成一份合法 .db")
 }
 
 fn row_to_line(vals : Array[@sqlite.Value]) -> String {
@@ -127,7 +129,42 @@ fn cmd_dump(db : @sqlite.Db, table : String) -> Unit {
 }
 
 fn is_command(s : String) -> Bool {
-  s == "header" || s == "schema" || s == "tree" || s == "query" || s == "dump"
+  s == "header" || s == "schema" || s == "tree" || s == "query" || s == "dump" || s == "make"
+}
+
+fn cmd_make(path : String) -> Unit {
+  let bytes = @sqlite.make_demo_db() catch {
+    _ => {
+      println("生成数据库失败")
+      return
+    }
+  }
+  write_file(path, bytes)
+  println("已生成 \{path}（\{bytes.length()} 字节）")
+  // 立即用本库读回，验证自洽
+  let db = @sqlite.Db::open(bytes) catch {
+    e => {
+      println("读写自洽校验失败：\{e.message()}")
+      return
+    }
+  }
+  let t = db.table("users") catch {
+    e => {
+      println("读写自洽校验失败：\{e.message()}")
+      return
+    }
+  }
+  let rows = db.rows(t) catch {
+    e => {
+      println("读写自洽校验失败：\{e.message()}")
+      return
+    }
+  }
+  println("自洽校验通过：users 表共 \{rows.length()} 行")
+  for r in rows {
+    println("  " + row_to_line(r.values))
+  }
+  println("可用官方 sqlite3 打开验证：sqlite3 \{path} \"SELECT * FROM users\"")
 }
 
 fn main {
@@ -146,6 +183,11 @@ fn main {
   }
   let cmd = args[at]
   let path = args[at + 1]
+  if cmd == "make" {
+    // make 的输出文件尚不存在，跳过读取，直接交给 cmd_make 生成
+    cmd_make(path)
+    return
+  }
   let bytes = read_file(path)
   let db = @sqlite.Db::open(bytes) catch {
     e => {
