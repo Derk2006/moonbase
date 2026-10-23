@@ -30,7 +30,7 @@ inverse of the parser and reuses it for self-verification. MoonBase is a
 | Reader — header / varint / records / B-tree / schema / query | ✅ implemented, unit-tested |
 | Writer — `make_db`, overflow chains, leaf→interior upgrade, multi-table | ✅ implemented, opens in official `sqlite3` |
 | SQL export — `dump-sql` | ✅ implemented, replay-verified by official `sqlite3` |
-| Unit tests | ✅ 20 passing (`moon test`) |
+| Unit tests | ✅ 21 passing (`moon test`) |
 | CI | ✅ GitHub Actions (`moon check` / `moon test` / js + wasm-gc builds) |
 | License | ✅ Apache-2.0 (`LICENSE`) |
 | Cross-backend | ✅ pure MoonBit, zero FFI (js / wasm-gc / wasm / native) |
@@ -81,7 +81,7 @@ moonbase/
 | **Writer** | `make_db(Tables)` materialises a valid `.db` **from scratch** in pure MoonBit: 100-byte header, leaf/interior table B-trees, records, overflow-page chains, `sqlite_master` rows; `INTEGER PRIMARY KEY` rowid aliasing, auto rowid, multi-table. Output re-opens in official `sqlite3`. | ✅ |
 | **Export** | `export_sql` / CLI `dump-sql`: dump a whole database as a SQL script (`CREATE` + `INSERT` + `CREATE INDEX` + `COMMIT`); the official `sqlite3` replays it to identical rows (`PRAGMA integrity_check = ok`). | ✅ |
 | **FFI** | **None** — pure MoonBit, cross-compiles to js / wasm / native | ✅ |
-| **Tests** | 20 unit tests (10 reader + 5 writer round-trip + 5 export); writer output verified re-readable by the in-tree reader **and** by official `sqlite3` fixtures | ✅ |
+| **Tests** | 21 unit tests (10 reader + 5 writer round-trip + 6 export); writer output verified re-readable by the in-tree reader **and** by official `sqlite3` fixtures | ✅ |
 
 ## Repository
 

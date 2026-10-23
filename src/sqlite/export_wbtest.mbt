@@ -41,6 +41,27 @@ test "export: 浮点列之后的字段不偏移（回归）" {
   assert_eq(rows[0].values[3].to_display(), "X'DEADBEEF'")
 }
 
+/// 用公开的 RowSpec::new / TableSpec::new 构造两张表，验证导出覆盖两者。
+/// 同时也作为「外部包可用 API」在包内的一次自检。
+test "export: 多表数据库导出两张表的建表与数据" {
+  let a : Array[RowSpec] = [
+    RowSpec::new(None, [VInt(Int64::from_int(1)), VText("x")]),
+  ]
+  let b : Array[RowSpec] = [
+    RowSpec::new(None, [VInt(Int64::from_int(2)), VText("y")]),
+  ]
+  let tables : Array[TableSpec] = [
+    TableSpec::new("a", "CREATE TABLE a(id integer primary key, t text)", a),
+    TableSpec::new("b", "CREATE TABLE b(id integer primary key, t text)", b),
+  ]
+  let db = Db::open(make_db(tables))
+  let sql = export_sql(db)
+  assert_true(sql.contains("CREATE TABLE a"))
+  assert_true(sql.contains("CREATE TABLE b"))
+  assert_true(sql.contains("INSERT INTO \"a\""))
+  assert_true(sql.contains("INSERT INTO \"b\""))
+}
+
 test "export: 每行数据都产出一条 INSERT" {
   let db = Db::open(make_demo_db())
   let sql = export_sql(db)
