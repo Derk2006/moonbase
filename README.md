@@ -1,5 +1,9 @@
 # MoonBase — Pure-MoonBit SQLite File-Format Reader & Writer
 
+[![CI](https://github.com/Derk2006/moonbase/actions/workflows/ci.yml/badge.svg)](https://github.com/Derk2006/moonbase/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![MoonBit](https://img.shields.io/badge/MoonBit-zero%20FFI-purple.svg)](https://www.moonbitlang.com/)
+
 **A zero-FFI, byte-level reader *and* writer for the real SQLite database file format (version 3), written entirely in MoonBit.**
 
 MoonBase does **not** reimplement a database engine. Instead it speaks the SQLite
@@ -18,6 +22,18 @@ inverse of the parser and reuses it for self-verification. MoonBase is a
 > byte-for-byte against the reference implementation.
 
 ---
+
+## Status
+
+| Area | State |
+|---|---|
+| Reader — header / varint / records / B-tree / schema / query | ✅ implemented, unit-tested |
+| Writer — `make_db`, overflow chains, leaf→interior upgrade, multi-table | ✅ implemented, opens in official `sqlite3` |
+| SQL export — `dump-sql` | ✅ implemented, replay-verified by official `sqlite3` |
+| Unit tests | ✅ 20 passing (`moon test`) |
+| CI | ✅ GitHub Actions (`moon check` / `moon test` / js + wasm-gc builds) |
+| License | ✅ Apache-2.0 (`LICENSE`) |
+| Cross-backend | ✅ pure MoonBit, zero FFI (js / wasm-gc / wasm / native) |
 
 ## Why this direction
 
@@ -44,8 +60,10 @@ moonbase/
 │   ├── db.mbt             Db facade: open, table lookup, row materialisation
 │   ├── query.mbt          Read-only SELECT: projection, COUNT(*), WHERE, ORDER BY, LIMIT (3-valued logic)
 │   ├── writer.mbt         **Writer**: make_db / make_demo_db — generate valid .db from scratch (header, leaf/interior table B-trees, records, overflow chains, sqlite_master)
+│   ├── export.mbt         Export a whole database as a replayable SQL script (export_sql)
 │   ├── value_wbtest.mbt   10 reader unit tests
-│   └── writer_wbtest.mbt  5 writer round-trip tests (small table, float64, overflow, multi-leaf interior, multi-table)
+│   ├── writer_wbtest.mbt  5 writer round-trip tests (small table, float64, overflow, multi-leaf interior, multi-table)
+│   └── export_wbtest.mbt  5 export / SQL-literal tests
 └── cmd/moonbase-cli/      CLI demo (js backend; Node fs for real file I/O)
 ```
 
@@ -61,8 +79,9 @@ moonbase/
 | **Query** | `SELECT *`, column projection + `AS`, `COUNT(*)`, `WHERE` (`= <> < <= > >= AND OR NOT IS [NOT] NULL`), `ORDER BY … ASC|DESC`, `LIMIT` | ✅ |
 | **Collation** | Code-point-wise text compare (matches SQLite, *not* MoonBit's length-first order) | ✅ |
 | **Writer** | `make_db(Tables)` materialises a valid `.db` **from scratch** in pure MoonBit: 100-byte header, leaf/interior table B-trees, records, overflow-page chains, `sqlite_master` rows; `INTEGER PRIMARY KEY` rowid aliasing, auto rowid, multi-table. Output re-opens in official `sqlite3`. | ✅ |
+| **Export** | `export_sql` / CLI `dump-sql`: dump a whole database as a SQL script (`CREATE` + `INSERT` + `CREATE INDEX` + `COMMIT`); the official `sqlite3` replays it to identical rows (`PRAGMA integrity_check = ok`). | ✅ |
 | **FFI** | **None** — pure MoonBit, cross-compiles to js / wasm / native | ✅ |
-| **Tests** | 15 unit tests (10 reader + 5 writer round-trip); writer output verified re-readable by the in-tree reader **and** by official `sqlite3` fixtures | ✅ |
+| **Tests** | 20 unit tests (10 reader + 5 writer round-trip + 5 export); writer output verified re-readable by the in-tree reader **and** by official `sqlite3` fixtures | ✅ |
 
 ## Repository
 
@@ -91,8 +110,50 @@ moonbase-cli schema <file.db>               list tables / indexes / columns
 moonbase-cli tree   <file.db> <table>       show the table B-tree root + row count
 moonbase-cli query  <file.db> "SELECT ..."  run a read-only query
 moonbase-cli dump   <file.db> <table>       export the whole table (pipe-separated)
+moonbase-cli dump-sql <file.db>             export the whole database as a SQL script
 moonbase-cli make   <out.db>                generate a legal .db from scratch (pure MoonBit writer)
 ```
+
+## Library usage
+
+Add `Derk2006/moonbase/src/sqlite` to your `moon.pkg` imports, then:
+
+```moonbit
+// ---- read ----
+let db = @sqlite.Db::open(bytes)                       // bytes: Bytes of a .db file
+let t  = db.table("users")
+for row in db.rows(t) { /* row.values : Array[Value] */ }
+let rs = @sqlite.query(db, "SELECT name FROM users ORDER BY name")
+
+// ---- write: generate a brand-new .db from scratch ----
+let rows : Array[@sqlite.RowSpec] = [
+  @sqlite.RowSpec::new(None, [
+    @sqlite.VInt(Int64::from_int(1)),
+    @sqlite.VText("Alice"),
+  ]),
+]
+let tables : Array[@sqlite.TableSpec] = [
+  @sqlite.TableSpec::new(
+    "users",
+    "CREATE TABLE users(id integer primary key, name text)",
+    rows,
+  ),
+]
+let out_bytes = @sqlite.make_db(tables)
+
+// ---- export: dump the whole DB as a replayable SQL script ----
+let sql = @sqlite.export_sql(db)
+```
+
+See **[docs/USAGE.md](docs/USAGE.md)** for the full API, the supported format/SQL
+subset, limitations, and verification steps.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [docs/USAGE.md](docs/USAGE.md) | Full usage guide: CLI, read API, writer API, export, limitations |
+| [CHANGELOG.md](CHANGELOG.md) | Release history and notable fixes |
 
 ## Example (against a real `sqlite3`-generated file)
 
@@ -137,6 +198,10 @@ The output matches the official `sqlite3` CLI exactly.
    is a *real* SQLite database, not a private format. Verified across: small tables, exact
    IEEE-754 float64 round-trip (incl. `-0.125`, `π`, `0.0`), >4 KB overflow-page chains,
    300-row trees that force a leaf→interior-page upgrade, and multiple tables in one file.
+4. **Export round-trip**: `dump-sql` emits a SQL script from that database, which the
+   **official** `sqlite3` replays into a fresh file. Every row is compared value-by-value
+   and `PRAGMA integrity_check` must return `ok`. This also covers 64-bit integer extremes
+   (`±2^63`) and multi-column records containing `REAL` followed by `BLOB`.
 
 ## Example — generate a `.db` with the pure-MoonBit writer
 
@@ -160,4 +225,5 @@ speaks SQLite — including the reference `sqlite3` — can consume it.
 
 ## License
 
-Apache-2.0
+Licensed under the [Apache License, Version 2.0](LICENSE). See [`LICENSE`](LICENSE) for
+the full text.
