@@ -424,6 +424,26 @@ pub struct TableSpec {
   rows : Array[RowSpec]
 }
 
+/// 构造一行输入。
+///
+/// 结构体字段对其他包不可见，外部使用者必须通过本构造器创建 `RowSpec`。
+/// `rowid` 传 `None` 表示由写入器自动分配自增 rowid。
+pub fn RowSpec::new(rowid : Int64?, values : Array[Value]) -> RowSpec {
+  { rowid, values }
+}
+
+/// 构造一张表的输入。
+///
+/// `sql` 必须是与该表列定义一致的 `CREATE TABLE` 语句，它会原样写入
+/// `sqlite_master.sql`，因此读回时列名 / 类型 / 主键信息都能还原。
+pub fn TableSpec::new(
+  name : String,
+  sql : String,
+  rows : Array[RowSpec]
+) -> TableSpec {
+  { name, sql, rows }
+}
+
 fn find_alias(def : TableDef) -> Int {
   for i = 0; i < def.columns.length(); i = i + 1 {
     if def.columns[i].is_rowid_alias {

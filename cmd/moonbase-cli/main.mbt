@@ -6,6 +6,7 @@
 ///   moonbase-cli tree   <file.db> <table>      打印表 B 树结构
 ///   moonbase-cli query  <file.db> "<sql>"      执行只读查询
 ///   moonbase-cli dump   <file.db> <table>      导出整表（竖线分隔）
+///   moonbase-cli dump-sql <file.db>            导出整库为 SQL 脚本（可直接喂给 sqlite3）
 ///   moonbase-cli make   <out.db>               用纯 MoonBit 生成一份合法 .db
 
 fn usage() -> Unit {
@@ -17,6 +18,7 @@ fn usage() -> Unit {
   println("  moonbase-cli tree   <file.db> <table>")
   println("  moonbase-cli query  <file.db> \"SELECT ...\"")
   println("  moonbase-cli dump   <file.db> <table>")
+  println("  moonbase-cli dump-sql <file.db>           导出整库为 SQL 脚本（> out.sql）")
   println("  moonbase-cli make   <out.db>              用纯 MoonBit 生成一份合法 .db")
 }
 
@@ -128,14 +130,63 @@ fn cmd_dump(db : @sqlite.Db, table : String) -> Unit {
   }
 }
 
+fn cmd_dump_sql(db : @sqlite.Db) -> Unit {
+  let sql = @sqlite.export_sql(db) catch {
+    e => {
+      println(e.message())
+      return
+    }
+  }
+  // 直接输出到 stdout，便于 `> out.sql` 重定向
+  println(sql)
+}
+
 fn is_command(s : String) -> Bool {
-  s == "header" || s == "schema" || s == "tree" || s == "query" || s == "dump" || s == "make"
+  s == "header" || s == "schema" || s == "tree" || s == "query" || s == "dump" || s == "dump-sql" || s == "make"
 }
 
 fn cmd_make(path : String) -> Unit {
-  let bytes = @sqlite.make_demo_db() catch {
-    _ => {
-      println("生成数据库失败")
+  // 通过「外部包可用的公开 API」构造数据：RowSpec::new / TableSpec::new。
+  // 这既是 CLI 演示，也是写入器库 API 的可用性验证。
+  let rows : Array[@sqlite.RowSpec] = [
+    @sqlite.RowSpec::new(
+      None,
+      [
+        @sqlite.VInt(Int64::from_int(1)),
+        @sqlite.VText("Alice"),
+        @sqlite.VReal(91.5),
+        @sqlite.VBlob(Bytes::from_array([b'\xDE', b'\xAD', b'\xBE', b'\xEF'])),
+      ],
+    ),
+    @sqlite.RowSpec::new(
+      None,
+      [
+        @sqlite.VInt(Int64::from_int(2)),
+        @sqlite.VText("Bob"),
+        @sqlite.VReal(88.0),
+        @sqlite.VBlob(Bytes::new(0)),
+      ],
+    ),
+    @sqlite.RowSpec::new(
+      None,
+      [
+        @sqlite.VInt(Int64::from_int(3)),
+        @sqlite.VText("陈小明"),
+        @sqlite.VReal(77.25),
+        @sqlite.VBlob(Bytes::from_array([b'\x01', b'\x02'])),
+      ],
+    ),
+  ]
+  let tables : Array[@sqlite.TableSpec] = [
+    @sqlite.TableSpec::new(
+      "users",
+      "CREATE TABLE users(id integer primary key, name text, score real, memo blob)",
+      rows,
+    ),
+  ]
+  let bytes = @sqlite.make_db(tables) catch {
+    e => {
+      println("生成数据库失败：\{e.message()}")
       return
     }
   }
@@ -205,6 +256,8 @@ fn main {
     cmd_query(db, args[at + 2])
   } else if cmd == "dump" && at + 2 < args.length() {
     cmd_dump(db, args[at + 2])
+  } else if cmd == "dump-sql" {
+    cmd_dump_sql(db)
   } else {
     usage()
   }
