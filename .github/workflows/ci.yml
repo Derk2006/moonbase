@@ -33,3 +33,9 @@ jobs:
 
       - name: Build library (wasm-gc)
         run: moon build --target wasm-gc
+
+      - name: End-to-end interop with official SQLite
+        run: |
+          node _build/js/debug/build/cmd/moonbase-cli/moonbase-cli.js make /tmp/mb_out.db
+          node _build/js/debug/build/cmd/moonbase-cli/moonbase-cli.js dump-sql /tmp/mb_out.db > /tmp/mb_out.sql
+          python3 scripts/e2e_check.py /tmp/mb_out.db /tmp/mb_out.sql

@@ -18,7 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `docs/USAGE.md`: a complete usage guide covering the CLI, the read API, the
   writer API, export, the supported subset, limitations and verification steps.
 - Continuous integration: `moon check`, `moon test` and `moon build --target js`
-  on every push and pull request.
+  on every push and pull request. The CI also runs an **end-to-end interop check**
+  (`scripts/e2e_check.py`): it generates a `.db` with the MoonBase CLI and replays
+  its exported SQL through the official SQLite, asserting identical rows and
+  `PRAGMA integrity_check = ok`.
 
 ### Fixed
 
