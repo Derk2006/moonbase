@@ -36,6 +36,8 @@ jobs:
 
       - name: End-to-end interop with official SQLite
         run: |
-          node _build/js/debug/build/cmd/moonbase-cli/moonbase-cli.js make /tmp/mb_out.db
-          node _build/js/debug/build/cmd/moonbase-cli/moonbase-cli.js dump-sql /tmp/mb_out.db > /tmp/mb_out.sql
-          python3 scripts/e2e_check.py /tmp/mb_out.db /tmp/mb_out.sql
+          CLI=_build/js/debug/build/cmd/moonbase-cli/moonbase-cli.js
+          node $CLI make /tmp/mb_out.db
+          node $CLI dump-sql /tmp/mb_out.db > /tmp/mb_out.sql
+          node $CLI make /tmp/mb_big.db 400
+          python3 scripts/e2e_check.py /tmp/mb_out.db /tmp/mb_out.sql /tmp/mb_big.db
