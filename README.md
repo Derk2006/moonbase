@@ -29,8 +29,9 @@ inverse of the parser and reuses it for self-verification. MoonBase is a
 |---|---|
 | Reader — header / varint / records / B-tree / schema / query | ✅ implemented, unit-tested |
 | Writer — `make_db`, overflow chains, leaf→interior upgrade, multi-table | ✅ implemented, opens in official `sqlite3` |
+| Writer — index B-trees (leaf type 10 / interior type 2) | ✅ implemented, `PRAGMA integrity_check = ok` + planner uses the index |
 | SQL export — `dump-sql` | ✅ implemented, replay-verified by official `sqlite3` |
-| Unit tests | ✅ 21 passing (`moon test`) |
+| Unit tests | ✅ 25 passing (`moon test`) |
 | CI | ✅ GitHub Actions (`moon check` / `moon test` / js + wasm-gc builds) |
 | License | ✅ Apache-2.0 (`LICENSE`) |
 | Cross-backend | ✅ pure MoonBit, zero FFI (js / wasm-gc / wasm / native) |
@@ -59,10 +60,10 @@ moonbase/
 │   ├── schema.mbt         sqlite_master scan + CREATE TABLE parser (rowid alias, WITHOUT ROWID)
 │   ├── db.mbt             Db facade: open, table lookup, row materialisation
 │   ├── query.mbt          Read-only SELECT: projection, COUNT(*), WHERE, ORDER BY, LIMIT (3-valued logic)
-│   ├── writer.mbt         **Writer**: make_db / make_demo_db — generate valid .db from scratch (header, leaf/interior table B-trees, records, overflow chains, sqlite_master)
+│   ├── writer.mbt         **Writer**: make_db — generate valid .db from scratch (header, table & index B-trees, records, overflow chains, sqlite_master)
 │   ├── export.mbt         Export a whole database as a replayable SQL script (export_sql)
 │   ├── value_wbtest.mbt   10 reader unit tests
-│   ├── writer_wbtest.mbt  5 writer round-trip tests (small table, float64, overflow, multi-leaf interior, multi-table)
+│   ├── writer_wbtest.mbt  9 writer round-trip tests (tables, float64, overflow, multi-leaf, multi-table, index ordering/separators)
 │   └── export_wbtest.mbt  5 export / SQL-literal tests
 └── cmd/moonbase-cli/      CLI demo (js backend; Node fs for real file I/O)
 ```
@@ -79,9 +80,10 @@ moonbase/
 | **Query** | `SELECT *`, column projection + `AS`, `COUNT(*)`, `WHERE` (`= <> < <= > >= AND OR NOT IS [NOT] NULL`), `ORDER BY … ASC|DESC`, `LIMIT` | ✅ |
 | **Collation** | Code-point-wise text compare (matches SQLite, *not* MoonBit's length-first order) | ✅ |
 | **Writer** | `make_db(Tables)` materialises a valid `.db` **from scratch** in pure MoonBit: 100-byte header, leaf/interior table B-trees, records, overflow-page chains, `sqlite_master` rows; `INTEGER PRIMARY KEY` rowid aliasing, auto rowid, multi-table. Output re-opens in official `sqlite3`. | ✅ |
+| **Writer — indexes** | `IndexSpec` / `TableSpec::with_indexes` emit real index B-trees (leaf type 10, interior type 2): keys sorted with SQLite semantics (`NULL < number < text < BLOB`, rowid tie-break), separators promoted out of leaves, payload overflow supported. Verified by `PRAGMA integrity_check` and by the planner choosing the index. | ✅ |
 | **Export** | `export_sql` / CLI `dump-sql`: dump a whole database as a SQL script (`CREATE` + `INSERT` + `CREATE INDEX` + `COMMIT`); the official `sqlite3` replays it to identical rows (`PRAGMA integrity_check = ok`). | ✅ |
 | **FFI** | **None** — pure MoonBit, cross-compiles to js / wasm / native | ✅ |
-| **Tests** | 21 unit tests (10 reader + 5 writer round-trip + 6 export); writer output verified re-readable by the in-tree reader **and** by official `sqlite3` fixtures | ✅ |
+| **Tests** | 25 unit tests (10 reader + 9 writer/round-trip + 6 export); writer output verified re-readable by the in-tree reader **and** by official `sqlite3` fixtures | ✅ |
 
 ## Repository
 
@@ -111,7 +113,8 @@ moonbase-cli tree   <file.db> <table>       show the table B-tree root + row cou
 moonbase-cli query  <file.db> "SELECT ..."  run a read-only query
 moonbase-cli dump   <file.db> <table>       export the whole table (pipe-separated)
 moonbase-cli dump-sql <file.db>             export the whole database as a SQL script
-moonbase-cli make   <out.db>                generate a legal .db from scratch (pure MoonBit writer)
+moonbase-cli index  <file.db> <index>       list every entry of an index (key… + rowid)
+moonbase-cli make   <out.db> [rows]         generate a legal .db from scratch, with an index
 ```
 
 ## Library usage
@@ -198,6 +201,12 @@ The output matches the official `sqlite3` CLI exactly.
    is a *real* SQLite database, not a private format. Verified across: small tables, exact
    IEEE-754 float64 round-trip (incl. `-0.125`, `π`, `0.0`), >4 KB overflow-page chains,
    300-row trees that force a leaf→interior-page upgrade, and multiple tables in one file.
+3b. **Index verification**: `make out.db 400` produces an index that needs an interior page.
+   `PRAGMA integrity_check` must return `ok` (this catches a wrong leaf/interior split),
+   `PRAGMA index_list` must list it, `SELECT count(*) ... INDEXED BY` must equal the row
+   count, and `EXPLAIN QUERY PLAN` must report `USING COVERING INDEX`. MoonBase also reads
+   indexes written by *official* `sqlite3` (`moonbase-cli index`) and returns the same
+   entries in the same order.
 4. **Export round-trip**: `dump-sql` emits a SQL script from that database, which the
    **official** `sqlite3` replays into a fresh file. Every row is compared value-by-value
    and `PRAGMA integrity_check` must return `ok`. This also covers 64-bit integer extremes

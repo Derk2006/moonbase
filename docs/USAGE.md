@@ -59,7 +59,8 @@ moonbase-cli tree     <file.db> <table>       show the table B-tree root + row c
 moonbase-cli query    <file.db> "SELECT ..."  run a read-only query
 moonbase-cli dump     <file.db> <table>       export one table (pipe-separated)
 moonbase-cli dump-sql <file.db>               export the whole database as SQL
-moonbase-cli make     <out.db>                generate a legal .db from scratch
+moonbase-cli index    <file.db> <index>       list every entry of an index (key… + rowid)
+moonbase-cli make     <out.db> [rows]         generate a legal .db from scratch, with an index
 ```
 
 ### Examples
@@ -76,6 +77,10 @@ node .../moonbase-cli.js query demo.db \
 
 # 3) generate a brand-new database (pure MoonBit writer, no sqlite3 involved)
 node .../moonbase-cli.js make generated.db
+#    with 400 rows, which forces the index into a multi-page B-tree
+node .../moonbase-cli.js make generated_big.db 400
+#    read an index back (works on files written by official sqlite3 too)
+node .../moonbase-cli.js index generated.db idx_users_name
 
 # 4) dump the whole database as a replayable SQL script
 node .../moonbase-cli.js dump-sql demo.db > demo.sql
@@ -177,6 +182,45 @@ Notes:
   automatically upgrade a leaf page into an interior page with multiple leaves.
 - Multiple tables can be written into one file.
 
+#### Indexes
+
+`TableSpec::with_indexes` adds real index B-trees (leaf page type 10, interior
+page type 2) instead of only declaring them in `sqlite_master`:
+
+```moonbit
+let idxs : Array[@sqlite.IndexSpec] = [
+  @sqlite.IndexSpec::new(
+    "idx_users_name",                  // index name
+    "users",                           // table name
+    "CREATE INDEX idx_users_name ON users(name)",
+    ["name"],                          // key columns, in order
+  ),
+]
+
+let tables : Array[@sqlite.TableSpec] = [
+  @sqlite.TableSpec::with_indexes("users", create_sql, rows, idxs),
+]
+```
+
+Semantics that match SQLite:
+
+- Entries are `(key columns…, rowid)`; the trailing rowid is what makes a
+  non-unique index's keys unique.
+- Ordering follows SQLite's type order `NULL < number < text < BLOB`, with text
+  compared code-point-wise (`BINARY` collation) and ties broken by rowid.
+- When an index needs more than one leaf page, the largest key of each leaf is
+  **moved up** into the interior page as the separator. It appears exactly once
+  in the tree — duplicating it makes `PRAGMA integrity_check` report
+  `wrong # of entries in index`.
+- Index payloads that exceed the page-local limit spill into overflow pages, just
+  like table records.
+- An index on an `INTEGER PRIMARY KEY` column stores the real rowid value (the
+  table record stores `NULL` there).
+
+Reading side: `Db::index_entries(name)` returns every entry in key order, and
+`scan_index` walks interior keys too, so databases written by official `sqlite3`
+enumerate correctly.
+
 ### 5.3 Export a database as SQL
 
 ```moonbit
@@ -230,6 +274,9 @@ Text is escaped per the SQL standard (single quotes doubled), BLOBs are emitted 
   interop layer, not an engine.
 - The writer materialises a **fresh, fully committed** single-file database in one
   pass; it does not append to or modify an existing file.
+- The writer always uses a 4096-byte page size and UTF-8 text, and builds at most
+  one interior level per B-tree (enough for tens of thousands of rows). Deeper
+  trees and other page sizes are read correctly but are not generated yet.
 - Free-page reuse / `VACUUM` are not implemented.
 - Loading extensions, triggers, and virtual tables are out of scope.
 
