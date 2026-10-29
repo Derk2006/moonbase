@@ -330,6 +330,196 @@ fn build_interior_table_page(
   buf
 }
 
+// ---- 索引 B 树（页类型 10 / 2）----
+
+/// 索引页的本地 payload 公式与表页不同（见官方文档 2.4 节）：
+///   max_local = (usable-12)*64/255 - 23，min_local = (usable-12)*32/255 - 23
+fn local_length_index(p : Int, usable : Int) -> Int {
+  let max_local = ((usable - 12) * 64) / 255 - 23
+  let min_local = ((usable - 12) * 32) / 255 - 23
+  if p <= max_local {
+    p
+  } else {
+    let k = min_local + (p - min_local) % (usable - 4)
+    if k <= max_local { k } else { min_local }
+  }
+}
+
+/// 索引页可用的页内 payload 上限
+fn index_max_local(usable : Int) -> Int {
+  ((usable - 12) * 64) / 255 - 23
+}
+
+/// 索引叶子单元：varint(payload 长度) + 本地 payload（+ 4 字节溢出页指针）
+fn build_index_leaf_cell(
+  record : Array[Byte],
+  usable : Int
+) -> (Array[Byte], Array[Byte]?) {
+  let plen = record.length()
+  let onpage : Array[Byte] = []
+  for x in encode_varint(Int64::from_int(plen)) {
+    onpage.push(x)
+  }
+  if plen <= index_max_local(usable) {
+    for x in record {
+      onpage.push(x)
+    }
+    (onpage, None)
+  } else {
+    let loc = local_length_index(plen, usable)
+    for k = 0; k < loc; k = k + 1 {
+      onpage.push(record[k])
+    }
+    push_be32(onpage, 0)
+    let rest : Array[Byte] = []
+    for k = loc; k < plen; k = k + 1 {
+      rest.push(record[k])
+    }
+    (onpage, Some(rest))
+  }
+}
+
+/// 构建一张索引叶子页（页类型 10）
+fn build_leaf_index_page(
+  page_size : Int,
+  cells : Array[(Array[Byte], Array[Byte]?)]
+) -> (Array[Byte], Array[(Array[Byte], Int, Array[Byte])]) {
+  let buf : Array[Byte] = Array::make(page_size, bb(0))
+  buf[0] = bb(10)
+  let ptr_array_start = 8
+  let mut content_start = page_size
+  let pending : Array[(Array[Byte], Int, Array[Byte])] = []
+  for i = 0; i < cells.length(); i = i + 1 {
+    let (onpage, ov) = cells[i]
+    let clen = onpage.length()
+    content_start = content_start - clen
+    for k = 0; k < clen; k = k + 1 {
+      buf[content_start + k] = onpage[k]
+    }
+    put_be16(buf, ptr_array_start + 2 * i, content_start)
+    match ov {
+      Some(rest) => pending.push((buf, content_start + clen - 4, rest))
+      None => ()
+    }
+  }
+  put_be16(buf, 3, cells.length())
+  put_be16(buf, 1, 0)
+  put_be16(buf, 5, content_start)
+  buf[7] = bb(0)
+  (buf, pending)
+}
+
+/// 构建一张内部索引页（页类型 2）
+///
+/// 每个单元的 key 是**左子树最大键的副本**（索引 B 树的内部键与叶子键重复，
+/// 与表 B 树把分隔键移出叶子的做法不同）。
+fn build_interior_index_page(
+  page_size : Int,
+  children : Array[(Int, Array[Byte])],
+  right : Int
+) -> (Array[Byte], Array[(Array[Byte], Int, Array[Byte])]) {
+  let buf : Array[Byte] = Array::make(page_size, bb(0))
+  buf[0] = bb(2)
+  let n = children.length()
+  put_be16(buf, 3, n)
+  put_be16(buf, 1, 0)
+  put_be32(buf, 8, right)
+  let ptr_array_start = 12
+  let mut content_start = page_size
+  let pending : Array[(Array[Byte], Int, Array[Byte])] = []
+  for i = 0; i < n; i = i + 1 {
+    let (child, record) = children[i]
+    let plen = record.length()
+    let cell : Array[Byte] = []
+    push_be32(cell, child)
+    for x in encode_varint(Int64::from_int(plen)) {
+      cell.push(x)
+    }
+    let mut rest : Array[Byte]? = None
+    if plen <= index_max_local(page_size) {
+      for x in record {
+        cell.push(x)
+      }
+    } else {
+      let loc = local_length_index(plen, page_size)
+      for k = 0; k < loc; k = k + 1 {
+        cell.push(record[k])
+      }
+      push_be32(cell, 0)
+      let r : Array[Byte] = []
+      for k = loc; k < plen; k = k + 1 {
+        r.push(record[k])
+      }
+      rest = Some(r)
+    }
+    let clen = cell.length()
+    content_start = content_start - clen
+    for k = 0; k < clen; k = k + 1 {
+      buf[content_start + k] = cell[k]
+    }
+    put_be16(buf, ptr_array_start + 2 * i, content_start)
+    match rest {
+      Some(r) => pending.push((buf, content_start + clen - 4, r))
+      None => ()
+    }
+  }
+  put_be16(buf, 5, content_start)
+  buf[7] = bb(0)
+  (buf, pending)
+}
+
+/// 把索引条目贪心打包成若干叶子页的分组。
+///
+/// 返回 (每片要写入的条目, 每片提升到父页的分隔键)。索引 B 树的每个键在整棵
+/// 树中只出现一次：分片时把每片（最后一片除外）的最大键**移出**叶子、放进内部
+/// 页，否则 sqlite3 的 `PRAGMA integrity_check` 会报 "wrong # of entries in index"。
+fn pack_index_leaves(
+  page_size : Int,
+  usable : Int,
+  records : Array[Array[Byte]]
+) -> (Array[Array[Array[Byte]]], Array[Array[Byte]]) {
+  let groups : Array[Array[Array[Byte]]] = []
+  let seps : Array[Array[Byte]] = []
+  if records.length() == 0 {
+    return (groups, seps)
+  }
+  let ptr_array_start = 8
+  let mut cur : Array[Array[Byte]] = []
+  let mut cur_start = page_size
+  for rec in records {
+    let (onpage, _) = build_index_leaf_cell(rec, usable)
+    let clen = onpage.length()
+    let needed_top = ptr_array_start + 2 * (cur.length() + 1)
+    if cur.length() > 0 && (cur_start - clen) < needed_top {
+      groups.push(cur)
+      cur = []
+      cur_start = page_size
+    }
+    cur_start = cur_start - clen
+    cur.push(rec)
+  }
+  if cur.length() > 0 {
+    groups.push(cur)
+  }
+  let out : Array[Array[Array[Byte]]] = []
+  for j = 0; j < groups.length(); j = j + 1 {
+    let g = groups[j]
+    if j < groups.length() - 1 {
+      let sep = g[g.length() - 1]
+      let cells : Array[Array[Byte]] = []
+      for k = 0; k < g.length() - 1; k = k + 1 {
+        cells.push(g[k])
+      }
+      out.push(cells)
+      seps.push(sep)
+    } else {
+      out.push(g)
+      seps.push([])
+    }
+  }
+  (out, seps)
+}
+
 /// 把单元贪心打包成若干叶子页（页内按 rowid 升序）
 fn pack_leaves(
   page_size : Int,
@@ -417,11 +607,20 @@ pub struct RowSpec {
   values : Array[Value]
 }
 
-/// 一张表：表名、CREATE TABLE 语句（用于 sqlite_master.sql）、行
+/// 一只索引：索引名、所属表、CREATE INDEX 语句、参与索引的列名（按键顺序）
+pub struct IndexSpec {
+  name : String
+  table : String
+  sql : String
+  columns : Array[String]
+}
+
+/// 一张表：表名、CREATE TABLE 语句（用于 sqlite_master.sql）、行、索引
 pub struct TableSpec {
   name : String
   sql : String
   rows : Array[RowSpec]
+  indexes : Array[IndexSpec]
 }
 
 /// 构造一行输入。
@@ -432,7 +631,17 @@ pub fn RowSpec::new(rowid : Int64?, values : Array[Value]) -> RowSpec {
   { rowid, values }
 }
 
-/// 构造一张表的输入。
+/// 构造一只索引。`columns` 是按索引键顺序排列的列名。
+pub fn IndexSpec::new(
+  name : String,
+  table : String,
+  sql : String,
+  columns : Array[String]
+) -> IndexSpec {
+  { name, table, sql, columns }
+}
+
+/// 构造一张表的输入（不含索引）。
 ///
 /// `sql` 必须是与该表列定义一致的 `CREATE TABLE` 语句，它会原样写入
 /// `sqlite_master.sql`，因此读回时列名 / 类型 / 主键信息都能还原。
@@ -441,7 +650,17 @@ pub fn TableSpec::new(
   sql : String,
   rows : Array[RowSpec]
 ) -> TableSpec {
-  { name, sql, rows }
+  { name, sql, rows, indexes: [] }
+}
+
+/// 构造一张带索引的表输入；索引会生成真实的索引 B 树（页类型 10 / 2）。
+pub fn TableSpec::with_indexes(
+  name : String,
+  sql : String,
+  rows : Array[RowSpec],
+  indexes : Array[IndexSpec]
+) -> TableSpec {
+  { name, sql, rows, indexes }
 }
 
 fn find_alias(def : TableDef) -> Int {
@@ -465,6 +684,71 @@ fn insertion_sort(arr : Array[(Int64, Array[Value])]) -> Unit {
   }
 }
 
+/// 把一行投影成索引键向量：索引列… + rowid（rowid 保证键唯一）
+fn index_entry_values(
+  rowid : Int64,
+  vals : Array[Value],
+  cols : Array[Int],
+  alias_idx : Int
+) -> Array[Value] {
+  let kv : Array[Value] = []
+  for c in cols {
+    let v = if c == alias_idx {
+      // INTEGER PRIMARY KEY 列在表记录里存 NULL，索引里必须写真实 rowid
+      VInt(rowid)
+    } else if c >= 0 && c < vals.length() {
+      vals[c]
+    } else {
+      VNull
+    }
+    kv.push(v)
+  }
+  kv.push(VInt(rowid))
+  kv
+}
+
+/// 按 SQLite 排序语义（NULL < 数值 < 文本 < BLOB）比较两个键向量
+fn cmp_key_vec(a : Array[Value], b : Array[Value]) -> Int {
+  let n = if a.length() < b.length() { a.length() } else { b.length() }
+  for i = 0; i < n; i = i + 1 {
+    let c = a[i].compare(b[i])
+    if c != 0 {
+      return c
+    }
+  }
+  0
+}
+
+fn sort_key_vecs(entries : Array[Array[Value]]) -> Unit {
+  for i = 1; i < entries.length(); i = i + 1 {
+    let key = entries[i]
+    let mut j = i - 1
+    while j >= 0 && cmp_key_vec(entries[j], key) > 0 {
+      entries[j + 1] = entries[j]
+      j = j - 1
+    }
+    entries[j + 1] = key
+  }
+}
+
+fn resolve_index_cols(def : TableDef, idx : IndexSpec) -> Array[Int] raise DbError {
+  let out : Array[Int] = []
+  for want in idx.columns {
+    let mut found = -1
+    for i = 0; i < def.columns.length(); i = i + 1 {
+      if same_name(def.columns[i].name, want) {
+        found = i
+        break
+      }
+    }
+    if found < 0 {
+      raise BadSql("索引 \{idx.name} 引用了不存在的列：\{want}")
+    }
+    out.push(found)
+  }
+  out
+}
+
 /// 从 schema + 数据生成合法的 SQLite `.db` 文件（Bytes），可被官方 sqlite3 打开
 pub fn make_db(tables : Array[TableSpec]) -> Bytes raise DbError {
   let page_size = 4096
@@ -473,6 +757,8 @@ pub fn make_db(tables : Array[TableSpec]) -> Bytes raise DbError {
 
   // Pass 1：为每张表构造 record、打包叶子页、收集溢出待填
   let table_packed : Array[(Array[Array[Byte]], Array[Int64])] = []
+  let table_rows : Array[Array[(Int64, Array[Value])]] = []
+  let table_defs : Array[TableDef] = []
   let all_pending : Array[(Array[Byte], Int, Array[Byte])] = []
   let master_rows : Array[(String, String, String, Int, String)] = []
 
@@ -526,22 +812,25 @@ pub fn make_db(tables : Array[TableSpec]) -> Bytes raise DbError {
       all_pending.push(p)
     }
     table_packed.push((leaves, leaf_max))
+    table_rows.push(rowbuf)
+    table_defs.push(def)
   }
 
-  // Pass 2：分配页号、构建内部页与 sqlite_master 行
+  // Pass 2：分配页号、构建内部页与 sqlite_master 行。
+  // body_pages 的下标即页号（页 1 固定是 sqlite_master），因此所有页必须按分配顺序进入。
   let mut pageno = 2
-  let table_pages : Array[Array[Byte]] = []
+  let body_pages : Array[Array[Byte]] = []
   for i = 0; i < tables.length(); i = i + 1 {
     let t = tables[i]
     let (leaves, leaf_max) = table_packed[i]
     if leaves.length() == 0 {
       let empty_cells : Array[(Int64, Array[Byte], Array[Byte]?)] = []
       let (ebuf, _) = build_leaf_table_page(page_size, 0, empty_cells)
-      table_pages.push(ebuf)
+      body_pages.push(ebuf)
       master_rows.push(("table", t.name, t.name, pageno, t.sql))
       pageno = pageno + 1
     } else if leaves.length() == 1 {
-      table_pages.push(leaves[0])
+      body_pages.push(leaves[0])
       master_rows.push(("table", t.name, t.name, pageno, t.sql))
       pageno = pageno + 1
     } else {
@@ -554,12 +843,78 @@ pub fn make_db(tables : Array[TableSpec]) -> Bytes raise DbError {
       }
       let right = child_start + (leaves.length() - 1)
       let interior = build_interior_table_page(page_size, children, right)
-      table_pages.push(interior)
+      body_pages.push(interior)
       for j = 0; j < leaves.length(); j = j + 1 {
-        table_pages.push(leaves[j])
+        body_pages.push(leaves[j])
       }
       master_rows.push(("table", t.name, t.name, root, t.sql))
       pageno = pageno + 1 + leaves.length()
+    }
+  }
+
+  // Pass 3：为每只索引构建索引 B 树（键排序 + 叶子页 + 必要时内部页）
+  for i = 0; i < tables.length(); i = i + 1 {
+    let t = tables[i]
+    let def = table_defs[i]
+    let rows = table_rows[i]
+    let alias_idx = find_alias(def)
+    for idx in t.indexes {
+      let cols = resolve_index_cols(def, idx)
+      let keys : Array[Array[Value]] = []
+      for r in rows {
+        keys.push(index_entry_values(r.0, r.1, cols, alias_idx))
+      }
+      sort_key_vecs(keys)
+      let records : Array[Array[Byte]] = []
+      for kv in keys {
+        records.push(encode_record(kv))
+      }
+      let (groups, seps) = pack_index_leaves(page_size, usable, records)
+      if groups.length() == 0 {
+        let empty_cells : Array[(Array[Byte], Array[Byte]?)] = []
+        let (ebuf, _) = build_leaf_index_page(page_size, empty_cells)
+        body_pages.push(ebuf)
+        master_rows.push(("index", idx.name, t.name, pageno, idx.sql))
+        pageno = pageno + 1
+      } else if groups.length() == 1 {
+        let cells : Array[(Array[Byte], Array[Byte]?)] = []
+        for rec in groups[0] {
+          cells.push(build_index_leaf_cell(rec, usable))
+        }
+        let (buf, pending) = build_leaf_index_page(page_size, cells)
+        for p in pending {
+          all_pending.push(p)
+        }
+        body_pages.push(buf)
+        master_rows.push(("index", idx.name, t.name, pageno, idx.sql))
+        pageno = pageno + 1
+      } else {
+        let root = pageno
+        let child_start = pageno + 1
+        let children : Array[(Int, Array[Byte])] = []
+        for j = 0; j < groups.length() - 1; j = j + 1 {
+          children.push((child_start + j, seps[j]))
+        }
+        let right = child_start + (groups.length() - 1)
+        let (interior, pending2) = build_interior_index_page(page_size, children, right)
+        for p in pending2 {
+          all_pending.push(p)
+        }
+        body_pages.push(interior)
+        for g in groups {
+          let cells : Array[(Array[Byte], Array[Byte]?)] = []
+          for rec in g {
+            cells.push(build_index_leaf_cell(rec, usable))
+          }
+          let (buf, pending) = build_leaf_index_page(page_size, cells)
+          for p in pending {
+            all_pending.push(p)
+          }
+          body_pages.push(buf)
+        }
+        master_rows.push(("index", idx.name, t.name, root, idx.sql))
+        pageno = pageno + 1 + groups.length()
+      }
     }
   }
 
@@ -582,7 +937,7 @@ pub fn make_db(tables : Array[TableSpec]) -> Bytes raise DbError {
   }
   let (master_buf, _master_pending) = build_leaf_table_page(page_size, 100, master_cells)
 
-  // Pass 3：分配溢出页
+  // Pass 4：分配溢出页
   let overflow_pages : Array[Array[Byte]] = []
   for p in all_pending {
     let (buf, ptr_off, payload) = p
@@ -605,7 +960,7 @@ pub fn make_db(tables : Array[TableSpec]) -> Bytes raise DbError {
     }
   }
 
-  // Pass 4：组装文件并写入头
+  // Pass 5：组装文件并写入头
   let total_pages = pageno - 1
   let total_bytes = total_pages * page_size
   let out : Array[Byte] = Array::make(total_bytes, bb(0))
@@ -613,15 +968,14 @@ pub fn make_db(tables : Array[TableSpec]) -> Bytes raise DbError {
   for k = 0; k < page_size; k = k + 1 {
     out[k] = master_buf[k]
   }
-  // 表页 2..
+  // 页 2.. ：表页 / 索引页 / 溢出页（按分配顺序）
   let mut off = page_size
-  for pg in table_pages {
+  for pg in body_pages {
     for k = 0; k < page_size; k = k + 1 {
       out[off + k] = pg[k]
     }
     off = off + page_size
   }
-  // 溢出页
   for pg in overflow_pages {
     for k = 0; k < page_size; k = k + 1 {
       out[off + k] = pg[k]
@@ -661,6 +1015,15 @@ pub fn make_demo_db() -> Bytes raise DbError {
             VReal(77.25),
             VBlob(Bytes::from_array([b'\x01', b'\x02'])),
           ],
+        },
+      ],
+      // 一只二级索引：既演示索引 B 树生成，也让官方 sqlite3 的查询计划能命中索引
+      indexes: [
+        {
+          name: "idx_users_name",
+          table: "users",
+          sql: "CREATE INDEX idx_users_name ON users(name)",
+          columns: ["name"],
         },
       ],
     },
