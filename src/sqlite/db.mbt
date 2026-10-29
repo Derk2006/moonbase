@@ -1,7 +1,7 @@
 /// 数据库门面：一次打开，多次查询
 ///
-/// 本版本以「只读」为核心约束：不修改文件的任何字节，
-/// 因此不存在写放大，也不会因崩溃产生损坏——所有恢复动作都发生在内存镜像里。
+/// 读取路径不修改文件的任何字节：所有解码都在内存中进行，
+/// 因此不会因崩溃产生损坏，也不存在写放大。
 
 pub struct RowData {
   rowid : Int64
@@ -85,6 +85,63 @@ pub fn TableDef::column_names(self : TableDef) -> Array[String] {
   let out : Array[String] = []
   for c in self.columns {
     out.push(c.name)
+  }
+  out
+}
+
+// ---- 索引访问 ----
+
+/// 索引名（结构体字段对包外不可见，外部使用者通过访问器读取）
+pub fn IndexDef::index_name(self : IndexDef) -> String {
+  self.name
+}
+
+/// 索引所属表名
+pub fn IndexDef::table_name(self : IndexDef) -> String {
+  self.table
+}
+
+/// 索引 B 树根页号
+pub fn IndexDef::root(self : IndexDef) -> Int {
+  self.rootpage
+}
+
+/// 库中所有索引名，按 sqlite_master 顺序
+pub fn Db::index_names(self : Db) -> Array[String] {
+  let out : Array[String] = []
+  for idx in self.schema.indexes() {
+    out.push(idx.name)
+  }
+  out
+}
+
+fn Db::find_index(self : Db, name : String) -> IndexDef? {
+  for idx in self.schema.indexes() {
+    if idx.name == name {
+      return Some(idx)
+    }
+  }
+  let lower = name.to_lower()
+  for idx in self.schema.indexes() {
+    if idx.name.to_lower() == lower {
+      return Some(idx)
+    }
+  }
+  None
+}
+
+/// 读取一只索引的全部条目（按键升序）。
+///
+/// 每条记录 = 索引列… + rowid，因此最后一项可用于回表。
+pub fn Db::index_entries(self : Db, name : String) -> Array[Array[Value]] raise DbError {
+  let idx = match self.find_index(name) {
+    Some(x) => x
+    None => raise NotFound("索引不存在：\{name}")
+  }
+  let enc = self.pager.text_encoding()
+  let out : Array[Array[Value]] = []
+  for e in scan_index(self.pager, idx.rootpage) {
+    out.push(decode_record(e.payload, enc))
   }
   out
 }

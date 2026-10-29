@@ -275,9 +275,12 @@ fn collect_index_rows(
       }
     }
     PAGE_INTERIOR_INDEX => {
+      // 索引 B 树内部页的键本身也是索引条目（分片时从叶子提升上来），
+      // 必须按「左子树 → 本键 → …」的中序顺序一并输出，否则会漏条目。
       for i = 0; i < page.ncell; i = i + 1 {
-        let (child, _) = index_interior_cell(pager, page, i)
+        let (child, payload) = index_interior_cell(pager, page, i)
         collect_index_rows(pager, child, out, depth + 1)
+        out.push({ payload: payload })
       }
       collect_index_rows(pager, page.right_child, out, depth + 1)
     }
