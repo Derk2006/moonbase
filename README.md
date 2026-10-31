@@ -30,8 +30,11 @@ inverse of the parser and reuses it for self-verification. MoonBase is a
 | Reader — header / varint / records / B-tree / schema / query | ✅ implemented, unit-tested |
 | Writer — `make_db`, overflow chains, leaf→interior upgrade, multi-table | ✅ implemented, opens in official `sqlite3` |
 | Writer — index B-trees (leaf type 10 / interior type 2) | ✅ implemented, `PRAGMA integrity_check = ok` + planner uses the index |
+| Writer — multi-level B-trees (interior pages of interior pages) | ✅ implemented, 100 000 rows verify `integrity_check = ok` |
+| Writer — configurable page size (512 … 65536) | ✅ implemented, incl. the 65536 → `1` header special case |
+| Structure self-check — `verify_db` / CLI `check` | ✅ implemented, catches broken pages / duplicated page refs / orphan pages |
 | SQL export — `dump-sql` | ✅ implemented, replay-verified by official `sqlite3` |
-| Unit tests | ✅ 25 passing (`moon test`) |
+| Unit tests | ✅ 34 passing (`moon test`) |
 | CI | ✅ GitHub Actions (`moon check` / `moon test` / js + wasm-gc builds) |
 | License | ✅ Apache-2.0 (`LICENSE`) |
 | Cross-backend | ✅ pure MoonBit, zero FFI (js / wasm-gc / wasm / native) |
@@ -60,11 +63,14 @@ moonbase/
 │   ├── schema.mbt         sqlite_master scan + CREATE TABLE parser (rowid alias, WITHOUT ROWID)
 │   ├── db.mbt             Db facade: open, table lookup, row materialisation
 │   ├── query.mbt          Read-only SELECT: projection, COUNT(*), WHERE, ORDER BY, LIMIT (3-valued logic)
-│   ├── writer.mbt         **Writer**: make_db — generate valid .db from scratch (header, table & index B-trees, records, overflow chains, sqlite_master)
+│   ├── writer.mbt         **Writer**: make_db — generate valid .db from scratch (header, records, leaves, overflow chains, sqlite_master)
+│   ├── writer_tree.mbt    Writer: bottom-up multi-level table & index B-tree construction, page arena, page-size fan-out
+│   ├── verify.mbt         Structure self-check: page ownership, page types, key ordering, overflow chains, freelist
 │   ├── export.mbt         Export a whole database as a replayable SQL script (export_sql)
 │   ├── value_wbtest.mbt   10 reader unit tests
-│   ├── writer_wbtest.mbt  9 writer round-trip tests (tables, float64, overflow, multi-leaf, multi-table, index ordering/separators)
-│   └── export_wbtest.mbt  5 export / SQL-literal tests
+│   ├── writer_wbtest.mbt  13 writer tests (round-trip, float64, overflow, multi-leaf, multi-table, index ordering/separators, 3-level trees, page sizes)
+│   ├── verify_wbtest.mbt  5 self-check tests (clean db, overflow, multi-level, two corruption cases)
+│   └── export_wbtest.mbt  6 export / SQL-literal tests
 └── cmd/moonbase-cli/      CLI demo (js backend; Node fs for real file I/O)
 ```
 
@@ -81,9 +87,13 @@ moonbase/
 | **Collation** | Code-point-wise text compare (matches SQLite, *not* MoonBit's length-first order) | ✅ |
 | **Writer** | `make_db(Tables)` materialises a valid `.db` **from scratch** in pure MoonBit: 100-byte header, leaf/interior table B-trees, records, overflow-page chains, `sqlite_master` rows; `INTEGER PRIMARY KEY` rowid aliasing, auto rowid, multi-table. Output re-opens in official `sqlite3`. | ✅ |
 | **Writer — indexes** | `IndexSpec` / `TableSpec::with_indexes` emit real index B-trees (leaf type 10, interior type 2): keys sorted with SQLite semantics (`NULL < number < text < BLOB`, rowid tie-break), separators promoted out of leaves, payload overflow supported. Verified by `PRAGMA integrity_check` and by the planner choosing the index. | ✅ |
+| **Writer — multi-level trees** | Tables and indexes are packed bottom-up into as many interior levels as needed; a separator key is always *removed* from the page below (index B-trees) or *copied* (table B-trees), matching SQLite's two different key semantics. 20 000 rows on 512-byte pages produce a 3-level table tree and a 4-level index tree, still `integrity_check = ok`. | ✅ |
+| **Writer — page size** | `make_db_with_page_size(tables, 512…65536)` — header, usable space, overflow thresholds and fan-out all follow the chosen page size; 65536 is encoded as `1` in the 2-byte header field, as the spec requires. | ✅ |
+| **Writer — sorting** | Row and index ordering uses a stable bottom-up merge sort (`O(n log n)`), so 100 000-row files build in ~1 s instead of degrading quadratically. | ✅ |
+| **Self-check** | `verify_db(db)` / `moonbase-cli check`: walks every tree itself and validates file length vs page count, page ownership (no page referenced twice), page types vs tree kind, strict key/rowid ordering, overflow-chain completeness, freelist and orphan pages. Works on files produced by *official* `sqlite3` too (freelist, overflow, `WITHOUT ROWID`). | ✅ |
 | **Export** | `export_sql` / CLI `dump-sql`: dump a whole database as a SQL script (`CREATE` + `INSERT` + `CREATE INDEX` + `COMMIT`); the official `sqlite3` replays it to identical rows (`PRAGMA integrity_check = ok`). | ✅ |
 | **FFI** | **None** — pure MoonBit, cross-compiles to js / wasm / native | ✅ |
-| **Tests** | 25 unit tests (10 reader + 9 writer/round-trip + 6 export); writer output verified re-readable by the in-tree reader **and** by official `sqlite3` fixtures | ✅ |
+| **Tests** | 34 unit tests (10 reader + 13 writer + 5 self-check + 6 export); writer output verified re-readable by the in-tree reader **and** by official `sqlite3` fixtures | ✅ |
 
 ## Repository
 
@@ -114,7 +124,8 @@ moonbase-cli query  <file.db> "SELECT ..."  run a read-only query
 moonbase-cli dump   <file.db> <table>       export the whole table (pipe-separated)
 moonbase-cli dump-sql <file.db>             export the whole database as a SQL script
 moonbase-cli index  <file.db> <index>       list every entry of an index (key… + rowid)
-moonbase-cli make   <out.db> [rows]         generate a legal .db from scratch, with an index
+moonbase-cli check  <file.db>               structural self-check (no sqlite3 needed)
+moonbase-cli make   <out.db> [rows] [page]  generate a legal .db from scratch, with an index
 ```
 
 ## Library usage
@@ -142,7 +153,12 @@ let tables : Array[@sqlite.TableSpec] = [
     rows,
   ),
 ]
-let out_bytes = @sqlite.make_db(tables)
+let out_bytes = @sqlite.make_db(tables)                  // page size 4096
+let small     = @sqlite.make_db_with_page_size(tables, 512)  // 512 .. 65536
+
+// ---- self-check: walk the file structure without sqlite3 ----
+let report = @sqlite.verify_db(db)
+if !report.passed() { for p in report.problems() { println(p) } }
 
 // ---- export: dump the whole DB as a replayable SQL script ----
 let sql = @sqlite.export_sql(db)
@@ -201,12 +217,22 @@ The output matches the official `sqlite3` CLI exactly.
    is a *real* SQLite database, not a private format. Verified across: small tables, exact
    IEEE-754 float64 round-trip (incl. `-0.125`, `π`, `0.0`), >4 KB overflow-page chains,
    300-row trees that force a leaf→interior-page upgrade, and multiple tables in one file.
+3a. **Multi-level verification**: `make deep.db 20000 512` builds a database whose
+   table tree is 3 levels deep and whose index tree is 4 levels deep. `integrity_check`
+   still returns `ok`, `count(*)` matches, and the check script walks the pages itself
+   and asserts `depth >= 3` for both trees — a wrong separator promotion at the second
+   interior level would either lose keys or duplicate them.
 3b. **Index verification**: `make out.db 400` produces an index that needs an interior page.
    `PRAGMA integrity_check` must return `ok` (this catches a wrong leaf/interior split),
    `PRAGMA index_list` must list it, `SELECT count(*) ... INDEXED BY` must equal the row
    count, and `EXPLAIN QUERY PLAN` must report `USING COVERING INDEX`. MoonBase also reads
    indexes written by *official* `sqlite3` (`moonbase-cli index`) and returns the same
    entries in the same order.
+3c. **Structural self-check**: `moonbase-cli check` is an independent walker (it does not
+   reuse the query path). It is also run against files created by *official* `sqlite3`
+   (with a freelist, overflow pages and a `WITHOUT ROWID` table) and must report
+   `结构自检通过`; deliberately corrupted copies (illegal page type, page referenced twice,
+   `ncell` beyond page capacity) must be rejected.
 4. **Export round-trip**: `dump-sql` emits a SQL script from that database, which the
    **official** `sqlite3` replays into a fresh file. Every row is compared value-by-value
    and `PRAGMA integrity_check` must return `ok`. This also covers 64-bit integer extremes

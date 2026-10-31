@@ -60,7 +60,8 @@ moonbase-cli query    <file.db> "SELECT ..."  run a read-only query
 moonbase-cli dump     <file.db> <table>       export one table (pipe-separated)
 moonbase-cli dump-sql <file.db>               export the whole database as SQL
 moonbase-cli index    <file.db> <index>       list every entry of an index (key… + rowid)
-moonbase-cli make     <out.db> [rows]         generate a legal .db from scratch, with an index
+moonbase-cli check    <file.db>               structural self-check, no sqlite3 required
+moonbase-cli make     <out.db> [rows] [page]  generate a legal .db from scratch, with an index
 ```
 
 ### Examples
@@ -79,6 +80,10 @@ node .../moonbase-cli.js query demo.db \
 node .../moonbase-cli.js make generated.db
 #    with 400 rows, which forces the index into a multi-page B-tree
 node .../moonbase-cli.js make generated_big.db 400
+#    20 000 rows on 512-byte pages: 3-level table tree, 4-level index tree
+node .../moonbase-cli.js make generated_deep.db 20000 512
+#    structural self-check (works on official sqlite3 files as well)
+node .../moonbase-cli.js check generated_deep.db
 #    read an index back (works on files written by official sqlite3 too)
 node .../moonbase-cli.js index generated.db idx_users_name
 
@@ -179,8 +184,25 @@ Notes:
   the B-tree rowid, exactly as SQLite does.
 - `rowid: None` assigns an auto-incrementing rowid; pass `Some(id)` to control it.
 - Long records automatically spill into overflow-page chains; many rows
-  automatically upgrade a leaf page into an interior page with multiple leaves.
+  automatically upgrade a leaf page into an interior page with multiple leaves,
+  and — when even the interior page is full — into further interior levels.
+  There is no row-count ceiling besides memory.
 - Multiple tables can be written into one file.
+
+#### Page size
+
+```moonbit
+let bytes = @sqlite.make_db_with_page_size(tables, 512)   // 512, 1024, … 65536
+```
+
+The page size drives everything downstream: the header field, the usable bytes per
+page, the overflow threshold (`max_local`) and the fan-out of every B-tree. Small
+pages therefore exercise the multi-level code path with comparatively few rows —
+20 000 rows on 512-byte pages already produce a 3-level table tree and a 4-level
+index tree. `65536` is a special case in the format: it is written as `1` into the
+2-byte page-size field, and `Pager::open` maps it back.
+
+Any other value is rejected with `BadSql`.
 
 #### Indexes
 
@@ -221,7 +243,52 @@ Reading side: `Db::index_entries(name)` returns every entry in key order, and
 `scan_index` walks interior keys too, so databases written by official `sqlite3`
 enumerate correctly.
 
-### 5.3 Export a database as SQL
+#### Multi-level trees
+
+B-tree pages are packed bottom-up, level by level, until a single root remains:
+
+- Character (table) B-trees: an interior key is the **maximum rowid of the left
+  subtree**. It is a routing key and is *copied*, which is legal because table
+  interior keys are not counted as entries.
+- Index B-trees: an interior key is a real index entry. It is **moved out** of
+  the page below (never copied), so every key exists exactly once in the tree.
+  This is the invariant behind `integrity_check`'s `wrong # of entries in index`.
+
+Because each level is built only from the previous level's pages, the number of
+levels is unbounded in principle and grows automatically with the data.
+
+### 5.3 Structure self-check
+
+`verify_db` walks the file on its own (it does not go through the query path) and
+reports what it finds:
+
+```moonbit
+let report = @sqlite.verify_db(db)
+if report.passed() {
+  println(report.pages_total)      // total pages
+  println(report.tables[0].1)      // levels of the first table's B-tree
+} else {
+  for p in report.problems() { println(p) }
+}
+```
+
+What it checks:
+
+| Check | Why it matters |
+|---|---|
+| file length vs `page_size × page_count` | a truncated or mis-declared file must be caught early |
+| page ownership: every page used at most once | duplicate references silently corrupt the tree |
+| page type vs tree kind (table tree vs index tree) | catches a `WITHOUT ROWID` table misread as a rowid table |
+| strict rowid / index-key ordering | catches a wrong separator at any level |
+| overflow chains complete and cycle-free | long records |
+| freelist pages | official `sqlite3` files after `DELETE` |
+| pages nobody references | orphan pages left by a buggy writer |
+
+The CLI wrapper is `moonbase-cli check`; the same command also works on files
+produced by the official `sqlite3` (including `WITHOUT ROWID` tables and
+overflow pages) and on deliberately corrupted copies, which it rejects.
+
+### 5.4 Export a database as SQL
 
 ```moonbit
 let sql = @sqlite.export_sql(db)     // CREATE + INSERT + CREATE INDEX + COMMIT

@@ -8,7 +8,8 @@
 ///   moonbase-cli dump   <file.db> <table>      导出整表（竖线分隔）
 ///   moonbase-cli dump-sql <file.db>            导出整库为 SQL 脚本（可直接喂给 sqlite3）
 ///   moonbase-cli index  <file.db> <index>      打印一只索引的全部条目
-///   moonbase-cli make   <out.db> [行数]       用纯 MoonBit 生成一份合法 .db（含索引）
+///   moonbase-cli check  <file.db>              结构自检（不依赖官方 sqlite3）
+///   moonbase-cli make   <out.db> [行数] [页大小]  用纯 MoonBit 生成一份合法 .db（含索引）
 
 fn usage() -> Unit {
   println("MoonBase —— 纯 MoonBit 实现的 SQLite 文件格式读取 / 生成器")
@@ -21,7 +22,8 @@ fn usage() -> Unit {
   println("  moonbase-cli dump   <file.db> <table>")
   println("  moonbase-cli dump-sql <file.db>           导出整库为 SQL 脚本（> out.sql）")
   println("  moonbase-cli index  <file.db> <index>     打印一只索引的全部条目")
-  println("  moonbase-cli make   <out.db> [行数]       用纯 MoonBit 生成一份合法 .db（含索引）")
+  println("  moonbase-cli check  <file.db>             结构自检（不依赖官方 sqlite3）")
+  println("  moonbase-cli make   <out.db> [行数] [页大小]  用纯 MoonBit 生成一份合法 .db（含索引）")
 }
 
 fn row_to_line(vals : Array[@sqlite.Value]) -> String {
@@ -157,7 +159,15 @@ fn cmd_index(db : @sqlite.Db, name : String) -> Unit {
 }
 
 fn is_command(s : String) -> Bool {
-  s == "header" || s == "schema" || s == "tree" || s == "query" || s == "dump" || s == "dump-sql" || s == "index" || s == "make"
+  let commands = [
+    "header", "schema", "tree", "query", "dump", "dump-sql", "index", "make", "check",
+  ]
+  for c in commands {
+    if c == s {
+      return true
+    }
+  }
+  false
 }
 
 /// 解析可选的行数参数；非法或缺失时返回 0（由调用方取默认值）
@@ -186,7 +196,37 @@ fn parse_count(s : String) -> Int {
   n
 }
 
-fn cmd_make(path : String, row_count : Int) -> Unit {
+fn cmd_check(db : @sqlite.Db) -> Unit {
+  let r = @sqlite.verify_db(db) catch {
+    e => {
+      println("自检无法完成：\{e.message()}")
+      return
+    }
+  }
+  println("页总数 \{r.pages_total}")
+  println("  表：叶页 \{r.leaf_table}，内部页 \{r.interior_table}")
+  println("  索引：叶页 \{r.leaf_index}，内部页 \{r.interior_index}")
+  println("  溢出页 \{r.overflow}，空闲页 \{r.freelist}，未被引用页 \{r.unreferenced}")
+  println("  合计：表 \{r.table_rows} 行，索引 \{r.index_entries} 条")
+  for t in r.tables {
+    let (name, depth, rows) = t
+    println("  表 \{name}：\{depth} 层 B 树，\{rows} 行")
+  }
+  for i in r.indexes {
+    let (name, depth, entries) = i
+    println("  索引 \{name}：\{depth} 层 B 树，\{entries} 条")
+  }
+  if r.passed() {
+    println("结构自检通过")
+  } else {
+    println("发现 \{r.problems().length()} 个问题：")
+    for p in r.problems() {
+      println("  - \{p}")
+    }
+  }
+}
+
+fn cmd_make(path : String, row_count : Int, page_size : Int) -> Unit {
   // 通过「外部包可用的公开 API」构造数据：RowSpec::new / TableSpec::with_indexes。
   // 这既是 CLI 演示，也是写入器库 API 的可用性验证。
   let n = if row_count <= 0 { 3 } else { row_count }
@@ -234,14 +274,15 @@ fn cmd_make(path : String, row_count : Int) -> Unit {
       indexes,
     ),
   ]
-  let bytes = @sqlite.make_db(tables) catch {
+  let ps = if page_size <= 0 { 4096 } else { page_size }
+  let bytes = @sqlite.make_db_with_page_size(tables, ps) catch {
     e => {
       println("生成数据库失败：\{e.message()}")
       return
     }
   }
   write_file(path, bytes)
-  println("已生成 \{path}（\{bytes.length()} 字节）")
+  println("已生成 \{path}（\{bytes.length()} 字节，页大小 \{ps}，\{bytes.length() / ps} 页）")
   // 立即用本库读回，验证自洽
   let db = @sqlite.Db::open(bytes) catch {
     e => {
@@ -295,7 +336,12 @@ fn main {
     } else {
       0
     }
-    cmd_make(path, row_count)
+    let page_size = if at + 3 < args.length() {
+      parse_count(args[at + 3])
+    } else {
+      0
+    }
+    cmd_make(path, row_count, page_size)
     return
   }
   let bytes = read_file(path)
@@ -319,6 +365,8 @@ fn main {
     cmd_dump_sql(db)
   } else if cmd == "index" && at + 2 < args.length() {
     cmd_index(db, args[at + 2])
+  } else if cmd == "check" {
+    cmd_check(db)
   } else {
     usage()
   }

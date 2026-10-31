@@ -470,18 +470,23 @@ fn build_interior_index_page(
 
 /// 把索引条目贪心打包成若干叶子页的分组。
 ///
-/// 返回 (每片要写入的条目, 每片提升到父页的分隔键)。索引 B 树的每个键在整棵
-/// 树中只出现一次：分片时把每片（最后一片除外）的最大键**移出**叶子、放进内部
-/// 页，否则 sqlite3 的 `PRAGMA integrity_check` 会报 "wrong # of entries in index"。
+/// 返回 (每片要写入的条目, 每片上移到父页的分隔键, 每片子树的最大键)。
+/// `seps` 的末项是空数组（末片没有上移的键，其最大键仍在叶子中）；
+/// `group_max` 则每片都有值，供更高层继续上提时使用。
+///
+/// 索引 B 树的每个键在整棵树中只出现一次：分片时把每片（最后一片除外）的最大键
+/// **移出**叶子、放进内部页，否则 sqlite3 的 `PRAGMA integrity_check` 会报
+/// "wrong # of entries in index"。
 fn pack_index_leaves(
   page_size : Int,
   usable : Int,
   records : Array[Array[Byte]]
-) -> (Array[Array[Array[Byte]]], Array[Array[Byte]]) {
+) -> (Array[Array[Array[Byte]]], Array[Array[Byte]], Array[Array[Byte]]) {
   let groups : Array[Array[Array[Byte]]] = []
   let seps : Array[Array[Byte]] = []
+  let group_max : Array[Array[Byte]] = []
   if records.length() == 0 {
-    return (groups, seps)
+    return (groups, seps, group_max)
   }
   let ptr_array_start = 8
   let mut cur : Array[Array[Byte]] = []
@@ -504,6 +509,7 @@ fn pack_index_leaves(
   let out : Array[Array[Array[Byte]]] = []
   for j = 0; j < groups.length(); j = j + 1 {
     let g = groups[j]
+    group_max.push(g[g.length() - 1])
     if j < groups.length() - 1 {
       let sep = g[g.length() - 1]
       let cells : Array[Array[Byte]] = []
@@ -517,7 +523,7 @@ fn pack_index_leaves(
       seps.push([])
     }
   }
-  (out, seps)
+  (out, seps, group_max)
 }
 
 /// 把单元贪心打包成若干叶子页（页内按 rowid 升序）
@@ -576,7 +582,8 @@ fn write_db_header(buf : Array[Byte], page_size : Int, page_count : Int) -> Unit
   for i = 0; i < 16; i = i + 1 {
     buf[i] = magic[i].to_byte()
   }
-  put_be16(buf, 16, page_size)
+  // 65536 在 2 字节字段里存 1（官方文档 1.3 节的特例）
+  put_be16(buf, 16, if page_size == 65536 { 1 } else { page_size })
   buf[18] = bb(1)
   buf[19] = bb(1)
   buf[20] = bb(0)
@@ -672,15 +679,51 @@ fn find_alias(def : TableDef) -> Int {
   -1
 }
 
-fn insertion_sort(arr : Array[(Int64, Array[Value])]) -> Unit {
-  for i = 1; i < arr.length(); i = i + 1 {
-    let key = arr[i]
-    let mut j = i - 1
-    while j >= 0 && arr[j].0 > key.0 {
-      arr[j + 1] = arr[j]
-      j = j - 1
+/// 自底向上归并排序：写入十万级行数时仍保持 O(n log n)。
+///
+/// （早期版本用插入排序，几千行就会退化成平方级；归并同时保证稳定，
+/// 相同 rowid 的输入顺序不会被重排。）
+fn sort_rows_by_rowid(arr : Array[(Int64, Array[Value])]) -> Unit {
+  let n = arr.length()
+  if n < 2 {
+    return
+  }
+  let tmp : Array[(Int64, Array[Value])] = Array::make(n, arr[0])
+  let mut width = 1
+  while width < n {
+    let mut lo = 0
+    while lo < n {
+      let mid = min2(lo + width, n)
+      let hi = min2(lo + 2 * width, n)
+      let mut a = lo
+      let mut b = mid
+      let mut k = lo
+      while a < mid && b < hi {
+        if arr[b].0 < arr[a].0 {
+          tmp[k] = arr[b]
+          b = b + 1
+        } else {
+          tmp[k] = arr[a]
+          a = a + 1
+        }
+        k = k + 1
+      }
+      while a < mid {
+        tmp[k] = arr[a]
+        a = a + 1
+        k = k + 1
+      }
+      while b < hi {
+        tmp[k] = arr[b]
+        b = b + 1
+        k = k + 1
+      }
+      lo = lo + 2 * width
     }
-    arr[j + 1] = key
+    for t = 0; t < n; t = t + 1 {
+      arr[t] = tmp[t]
+    }
+    width = width * 2
   }
 }
 
@@ -719,15 +762,48 @@ fn cmp_key_vec(a : Array[Value], b : Array[Value]) -> Int {
   0
 }
 
+/// 按键向量的 SQLite 排序语义归并排序（稳定，O(n log n)）
 fn sort_key_vecs(entries : Array[Array[Value]]) -> Unit {
-  for i = 1; i < entries.length(); i = i + 1 {
-    let key = entries[i]
-    let mut j = i - 1
-    while j >= 0 && cmp_key_vec(entries[j], key) > 0 {
-      entries[j + 1] = entries[j]
-      j = j - 1
+  let n = entries.length()
+  if n < 2 {
+    return
+  }
+  let tmp : Array[Array[Value]] = Array::make(n, entries[0])
+  let mut width = 1
+  while width < n {
+    let mut lo = 0
+    while lo < n {
+      let mid = min2(lo + width, n)
+      let hi = min2(lo + 2 * width, n)
+      let mut a = lo
+      let mut b = mid
+      let mut k = lo
+      while a < mid && b < hi {
+        if cmp_key_vec(entries[b], entries[a]) < 0 {
+          tmp[k] = entries[b]
+          b = b + 1
+        } else {
+          tmp[k] = entries[a]
+          a = a + 1
+        }
+        k = k + 1
+      }
+      while a < mid {
+        tmp[k] = entries[a]
+        a = a + 1
+        k = k + 1
+      }
+      while b < hi {
+        tmp[k] = entries[b]
+        b = b + 1
+        k = k + 1
+      }
+      lo = lo + 2 * width
     }
-    entries[j + 1] = key
+    for t = 0; t < n; t = t + 1 {
+      entries[t] = tmp[t]
+    }
+    width = width * 2
   }
 }
 
@@ -749,11 +825,34 @@ fn resolve_index_cols(def : TableDef, idx : IndexSpec) -> Array[Int] raise DbErr
   out
 }
 
+/// 合法的页大小（SQLite 只接受 2 的幂，512 起、65536 止）
+fn valid_page_size(n : Int) -> Bool {
+  let allowed = [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+  for a in allowed {
+    if a == n {
+      return true
+    }
+  }
+  false
+}
+
 /// 从 schema + 数据生成合法的 SQLite `.db` 文件（Bytes），可被官方 sqlite3 打开
 pub fn make_db(tables : Array[TableSpec]) -> Bytes raise DbError {
-  let page_size = 4096
-  let reserved = 0
-  let usable = page_size - reserved
+  make_db_with_page_size(tables, 4096)
+}
+
+/// 同上，但可指定页大小（512 / 1024 / … / 65536）。
+///
+/// 页大小会同时影响数据库头、每页可用字节、溢出阈值与 B 树扇出：小页 + 大表
+/// 会自然长出多级内部页，因此它也是一条很好的「格式是否真正正确」的探针。
+pub fn make_db_with_page_size(
+  tables : Array[TableSpec],
+  page_size : Int
+) -> Bytes raise DbError {
+  if !valid_page_size(page_size) {
+    raise BadSql("非法页大小：\{page_size}（须为 512..65536 之间的 2 的幂）")
+  }
+  let usable = page_size
 
   // Pass 1：为每张表构造 record、打包叶子页、收集溢出待填
   let table_packed : Array[(Array[Array[Byte]], Array[Int64])] = []
@@ -799,7 +898,7 @@ pub fn make_db(tables : Array[TableSpec]) -> Bytes raise DbError {
       }
       rowbuf.push((rid, vals))
     }
-    insertion_sort(rowbuf)
+    sort_rows_by_rowid(rowbuf)
     let cells : Array[(Int64, Array[Byte], Array[Byte]?)] = []
     for j = 0; j < rowbuf.length(); j = j + 1 {
       let (rid, vals) = rowbuf[j]
@@ -816,43 +915,16 @@ pub fn make_db(tables : Array[TableSpec]) -> Bytes raise DbError {
     table_defs.push(def)
   }
 
-  // Pass 2：分配页号、构建内部页与 sqlite_master 行。
-  // body_pages 的下标即页号（页 1 固定是 sqlite_master），因此所有页必须按分配顺序进入。
-  let mut pageno = 2
-  let body_pages : Array[Array[Byte]] = []
+  // Pass 2：自底向上构建每张表的 B 树（叶子已建好，这里补齐任意层数的内部页）
+  let arena = PageArena::new()
   for i = 0; i < tables.length(); i = i + 1 {
     let t = tables[i]
     let (leaves, leaf_max) = table_packed[i]
-    if leaves.length() == 0 {
-      let empty_cells : Array[(Int64, Array[Byte], Array[Byte]?)] = []
-      let (ebuf, _) = build_leaf_table_page(page_size, 0, empty_cells)
-      body_pages.push(ebuf)
-      master_rows.push(("table", t.name, t.name, pageno, t.sql))
-      pageno = pageno + 1
-    } else if leaves.length() == 1 {
-      body_pages.push(leaves[0])
-      master_rows.push(("table", t.name, t.name, pageno, t.sql))
-      pageno = pageno + 1
-    } else {
-      let root = pageno
-      let child_start = pageno + 1
-      let cellcount = leaves.length() - 1
-      let children : Array[(Int, Int64)] = []
-      for j = 0; j < cellcount; j = j + 1 {
-        children.push((child_start + j, leaf_max[j]))
-      }
-      let right = child_start + (leaves.length() - 1)
-      let interior = build_interior_table_page(page_size, children, right)
-      body_pages.push(interior)
-      for j = 0; j < leaves.length(); j = j + 1 {
-        body_pages.push(leaves[j])
-      }
-      master_rows.push(("table", t.name, t.name, root, t.sql))
-      pageno = pageno + 1 + leaves.length()
-    }
+    let root = build_table_tree(arena, page_size, leaves, leaf_max)
+    master_rows.push(("table", t.name, t.name, root, t.sql))
   }
 
-  // Pass 3：为每只索引构建索引 B 树（键排序 + 叶子页 + 必要时内部页）
+  // Pass 3：为每只索引构建索引 B 树（键排序 + 叶子页 + 任意层数的内部页）
   for i = 0; i < tables.length(); i = i + 1 {
     let t = tables[i]
     let def = table_defs[i]
@@ -869,52 +941,9 @@ pub fn make_db(tables : Array[TableSpec]) -> Bytes raise DbError {
       for kv in keys {
         records.push(encode_record(kv))
       }
-      let (groups, seps) = pack_index_leaves(page_size, usable, records)
-      if groups.length() == 0 {
-        let empty_cells : Array[(Array[Byte], Array[Byte]?)] = []
-        let (ebuf, _) = build_leaf_index_page(page_size, empty_cells)
-        body_pages.push(ebuf)
-        master_rows.push(("index", idx.name, t.name, pageno, idx.sql))
-        pageno = pageno + 1
-      } else if groups.length() == 1 {
-        let cells : Array[(Array[Byte], Array[Byte]?)] = []
-        for rec in groups[0] {
-          cells.push(build_index_leaf_cell(rec, usable))
-        }
-        let (buf, pending) = build_leaf_index_page(page_size, cells)
-        for p in pending {
-          all_pending.push(p)
-        }
-        body_pages.push(buf)
-        master_rows.push(("index", idx.name, t.name, pageno, idx.sql))
-        pageno = pageno + 1
-      } else {
-        let root = pageno
-        let child_start = pageno + 1
-        let children : Array[(Int, Array[Byte])] = []
-        for j = 0; j < groups.length() - 1; j = j + 1 {
-          children.push((child_start + j, seps[j]))
-        }
-        let right = child_start + (groups.length() - 1)
-        let (interior, pending2) = build_interior_index_page(page_size, children, right)
-        for p in pending2 {
-          all_pending.push(p)
-        }
-        body_pages.push(interior)
-        for g in groups {
-          let cells : Array[(Array[Byte], Array[Byte]?)] = []
-          for rec in g {
-            cells.push(build_index_leaf_cell(rec, usable))
-          }
-          let (buf, pending) = build_leaf_index_page(page_size, cells)
-          for p in pending {
-            all_pending.push(p)
-          }
-          body_pages.push(buf)
-        }
-        master_rows.push(("index", idx.name, t.name, root, idx.sql))
-        pageno = pageno + 1 + groups.length()
-      }
+      let (groups, _seps, group_max) = pack_index_leaves(page_size, usable, records)
+      let root = build_index_tree(arena, page_size, usable, groups, group_max, all_pending)
+      master_rows.push(("index", idx.name, t.name, root, idx.sql))
     }
   }
 
@@ -937,46 +966,38 @@ pub fn make_db(tables : Array[TableSpec]) -> Bytes raise DbError {
   }
   let (master_buf, _master_pending) = build_leaf_table_page(page_size, 100, master_cells)
 
-  // Pass 4：分配溢出页
-  let overflow_pages : Array[Array[Byte]] = []
+  // Pass 4：分配溢出页（追加在所有 B 树页之后）
   for p in all_pending {
     let (buf, ptr_off, payload) = p
-    let ov_no = pageno
-    put_be32(buf, ptr_off, ov_no)
+    put_be32(buf, ptr_off, arena.next())
     let mut off = 0
     let remain = payload
     while off < remain.length() {
+      let page_no = arena.next()
       let last = off + (usable - 4) >= remain.length()
       let chunk = min2(usable - 4, remain.length() - off)
-      let next_no = if last { 0 } else { pageno + 1 }
+      let next_no = if last { 0 } else { page_no + 1 }
       let ovpage : Array[Byte] = Array::make(page_size, bb(0))
       put_be32(ovpage, 0, next_no)
       for k = 0; k < chunk; k = k + 1 {
         ovpage[4 + k] = remain[off + k]
       }
-      overflow_pages.push(ovpage)
-      pageno = pageno + 1
+      let _ = arena.alloc(ovpage)
       off = off + chunk
     }
   }
 
   // Pass 5：组装文件并写入头
-  let total_pages = pageno - 1
+  let total_pages = arena.pages.length() + 1
   let total_bytes = total_pages * page_size
   let out : Array[Byte] = Array::make(total_bytes, bb(0))
   // 页 1
   for k = 0; k < page_size; k = k + 1 {
     out[k] = master_buf[k]
   }
-  // 页 2.. ：表页 / 索引页 / 溢出页（按分配顺序）
+  // 页 2.. ：表页 / 索引页 / 溢出页（按分配顺序，与页号一一对应）
   let mut off = page_size
-  for pg in body_pages {
-    for k = 0; k < page_size; k = k + 1 {
-      out[off + k] = pg[k]
-    }
-    off = off + page_size
-  }
-  for pg in overflow_pages {
+  for pg in arena.pages {
     for k = 0; k < page_size; k = k + 1 {
       out[off + k] = pg[k]
     }

@@ -12,12 +12,16 @@ Proves that MoonBase's writer produces *real* SQLite files:
    SQLite into an identical database.
 4. A larger database (many rows -> multi-page index with an interior page) also
    passes `integrity_check`, which validates the promoted separator keys.
+5. A deep database (20 000 rows on 512-byte pages) forces *multi-level* B-trees;
+   the check walks the pages itself and asserts the tree is at least 3 levels
+   deep for both the table and the index, i.e. interior pages of interior pages.
 
 Usage:
-    python3 e2e_check.py <generated.db> <exported.sql> [generated_big.db]
+    python3 e2e_check.py <generated.db> <exported.sql> [big.db] [deep.db]
 """
 
 import sqlite3
+import struct
 import sys
 
 DEMO_ROWS = [
@@ -69,17 +73,63 @@ def check_big(db_path: str, n: int) -> None:
     assert hit == [(200,)], f"indexed lookup mismatch: {hit}"
 
 
+def tree_depth(data: bytes, page_size: int, root: int) -> int:
+    """Walk the B-tree ourselves and return its depth (a leaf-only tree is 1)."""
+    base = (root - 1) * page_size
+    page_type = data[base]
+    if page_type in (10, 13):  # leaf index / leaf table
+        return 1
+    assert page_type in (2, 5), f"unexpected page type {page_type} at page {root}"
+    ncell = struct.unpack(">H", data[base + 3 : base + 5])[0]
+    right = struct.unpack(">I", data[base + 8 : base + 12])[0]
+    children = []
+    for i in range(ncell):
+        off = struct.unpack(">H", data[base + 12 + 2 * i : base + 14 + 2 * i])[0]
+        children.append(struct.unpack(">I", data[base + off : base + off + 4])[0])
+    children.append(right)
+    return 1 + max(tree_depth(data, page_size, c) for c in children)
+
+
+def check_deep(db_path: str, n: int) -> None:
+    con = sqlite3.connect(db_path)
+    page_size = con.execute("PRAGMA page_size").fetchone()[0]
+    total = con.execute("SELECT count(*) FROM users").fetchone()[0]
+    via_index = con.execute("SELECT count(*) FROM users INDEXED BY idx_users_name").fetchone()[0]
+    roots = dict(
+        (name, root)
+        for _type, name, root in con.execute(
+            "SELECT type, name, rootpage FROM sqlite_master WHERE rootpage > 0"
+        )
+    )
+    integrity = con.execute("PRAGMA integrity_check").fetchone()
+    con.close()
+
+    assert page_size == 512, f"deep db page size: {page_size}"
+    assert integrity == ("ok",), f"deep db integrity: {integrity}"
+    assert total == n, f"deep db row count: {total} != {n}"
+    assert via_index == n, f"deep db index entries: {via_index} != {n}"
+
+    data = open(db_path, "rb").read()
+    table_depth = tree_depth(data, page_size, roots["users"])
+    index_depth = tree_depth(data, page_size, roots["idx_users_name"])
+    # 512 字节页装 20 000 行：叶子页装不下，内部页也装不下，必须出现第二层内部页
+    assert table_depth >= 3, f"table B-tree depth {table_depth}, expected >= 3"
+    assert index_depth >= 3, f"index B-tree depth {index_depth}, expected >= 3"
+
+
 def main() -> int:
-    if len(sys.argv) not in (3, 4):
+    if len(sys.argv) not in (3, 4, 5):
         print(
-            "usage: e2e_check.py <generated.db> <exported.sql> [generated_big.db]",
+            "usage: e2e_check.py <generated.db> <exported.sql> [big.db] [deep.db]",
             file=sys.stderr,
         )
         return 2
 
     check_demo(sys.argv[1], sys.argv[2])
-    if len(sys.argv) == 4:
+    if len(sys.argv) >= 4:
         check_big(sys.argv[3], 400)
+    if len(sys.argv) == 5:
+        check_deep(sys.argv[4], 20000)
 
     print("end-to-end interop OK")
     return 0

@@ -229,3 +229,104 @@ test "writer: 大量行生成内部索引页（多叶子）且键有序" {
   }
   assert_true(interior_index_pages > 0)
 }
+
+// ---- 多级 B 树 / 可配置页大小 ----
+
+/// 返回一棵 B 树的层数（只有叶子时为 1）
+fn tree_levels(pager : Pager, root : Int) -> Int raise DbError {
+  let page = BtreePage::parse(pager, root)
+  if page.is_leaf() {
+    return 1
+  }
+  let mut deepest = 1
+  for i = 0; i < page.ncell; i = i + 1 {
+    let (child, _) = table_interior_cell(pager, page, i)
+    let d = tree_levels(pager, child) + 1
+    if d > deepest {
+      deepest = d
+    }
+  }
+  let d = tree_levels(pager, page.right_child) + 1
+  if d > deepest {
+    deepest = d
+  }
+  deepest
+}
+
+test "writer: 512 字节页 + 20000 行生成三级表 B 树" {
+  let rows : Array[RowSpec] = []
+  for i = 1; i <= 20000; i = i + 1 {
+    rows.push(
+      RowSpec::new(None, [VInt(Int64::from_int(i)), VText("row" + i.to_string())]),
+    )
+  }
+  let tables : Array[TableSpec] = [
+    TableSpec::new("big", "CREATE TABLE big(id integer primary key, name text)", rows),
+  ]
+  let bytes = make_db_with_page_size(tables, 512)
+  let pager = Pager::open(bytes)
+  assert_eq(pager.page_size(), 512)
+  let schema = build_schema(pager)
+  let t = schema.find("big").unwrap()
+  // 小页 + 2000 行：叶子装不下，内部页也装不下，必须分层
+  assert_true(tree_levels(pager, t.rootpage) >= 3)
+  let got = scan_table(pager, t.rootpage)
+  assert_eq(got.length(), 20000)
+}
+
+test "writer: 512 字节页 + 20000 行生成多级索引 B 树且键有序" {
+  let rows : Array[RowSpec] = []
+  for i = 1; i <= 20000; i = i + 1 {
+    rows.push(
+      RowSpec::new(None, [VInt(Int64::from_int(i)), VText("k" + (i % 53).to_string())]),
+    )
+  }
+  let idxs : Array[IndexSpec] = [
+    IndexSpec::new("ix_k", "big", "CREATE INDEX ix_k ON big(k)", ["k"]),
+  ]
+  let tables : Array[TableSpec] = [
+    TableSpec::with_indexes(
+      "big",
+      "CREATE TABLE big(id integer primary key, k text)",
+      rows,
+      idxs,
+    ),
+  ]
+  let pager = Pager::open(make_db_with_page_size(tables, 512))
+  let idx = build_schema(pager).indexes()[0]
+  assert_true(tree_levels(pager, idx.rootpage) >= 3)
+  let keys = index_keys(pager, idx.rootpage)
+  assert_eq(keys.length(), 20000)
+  let mut prev = keys[0]
+  for i = 1; i < keys.length(); i = i + 1 {
+    assert_true(cmp_key_vec(prev, keys[i]) < 0)
+    prev = keys[i]
+  }
+}
+
+test "writer: 65536 字节页按官方特例编码为 1" {
+  let rows : Array[RowSpec] = [
+    RowSpec::new(None, [VInt(Int64::from_int(1)), VText("x")]),
+  ]
+  let tables : Array[TableSpec] = [
+    TableSpec::new("p", "CREATE TABLE p(id integer primary key, v text)", rows),
+  ]
+  let bytes = make_db_with_page_size(tables, 65536)
+  // 头部第 16 字节起是页大小，65536 存为 1
+  assert_eq((bytes[16].to_int() << 8) | bytes[17].to_int(), 1)
+  let pager = Pager::open(bytes)
+  assert_eq(pager.page_size(), 65536)
+  let t = build_schema(pager).find("p").unwrap()
+  assert_eq(scan_table(pager, t.rootpage).length(), 1)
+}
+
+test "writer: 非法页大小被拒绝" {
+  let tables : Array[TableSpec] = []
+  let mut raised = false
+  try {
+    let _ = make_db_with_page_size(tables, 3000)
+  } catch {
+    _ => raised = true
+  }
+  assert_true(raised)
+}

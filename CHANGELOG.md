@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Multi-level B-trees in the writer**: pages are now packed level by level, so
+  tables and indexes are no longer limited to a single interior page. Table
+  B-trees copy the left-subtree maximum rowid as a routing key; index B-trees
+  move the separator out of the page below so that every key exists exactly once.
+  Verified with 20 000 rows on 512-byte pages (3-level table tree, 4-level index
+  tree, `PRAGMA integrity_check = ok`) and 100 000 rows on 4 KiB pages.
+- **Configurable page size**: `make_db_with_page_size(tables, 512 … 65536)` and
+  `moonbase-cli make <out.db> [rows] [page]`. The value flows into the header,
+  the usable page space, the overflow threshold and the fan-out; 65536 is encoded
+  as `1` in the 2-byte header field as the format requires. Invalid sizes raise
+  `BadSql`.
+- **Structure self-check**: `verify_db(db)` and `moonbase-cli check <file.db>`
+  walk the file independently of the query path and validate file length vs page
+  count, page ownership (no page referenced twice), page type vs tree kind,
+  strict rowid / index-key ordering, overflow-chain completeness, freelist pages
+  and orphan pages. Works on files produced by the official `sqlite3` (freelist,
+  overflow, `WITHOUT ROWID`) and rejects deliberately corrupted copies.
+- **O(n log n) sorting**: row and index ordering switched from insertion sort to
+  a stable bottom-up merge sort, making 100 000-row files build in about a
+  second instead of degrading quadratically.
+- `writer_tree.mbt` (page arena + level packing) and `verify.mbt`, with 9 new
+  unit tests (34 in total).
 - **Index B-trees in the writer**: `IndexSpec` + `TableSpec::with_indexes` emit
   real index trees (leaf page type 10, interior page type 2) instead of merely
   declaring indexes in `sqlite_master`. Keys are `(columns…, rowid)` sorted with
