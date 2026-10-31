@@ -28,8 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **O(n log n) sorting**: row and index ordering switched from insertion sort to
   a stable bottom-up merge sort, making 100 000-row files build in about a
   second instead of degrading quadratically.
-- `writer_tree.mbt` (page arena + level packing) and `verify.mbt`, with 9 new
-  unit tests (34 in total).
+- `writer_tree.mbt` (page arena + level packing) and `verify.mbt`, with 10 new
+  unit tests (35 in total).
 - **Index B-trees in the writer**: `IndexSpec` + `TableSpec::with_indexes` emit
   real index trees (leaf page type 10, interior page type 2) instead of merely
   declaring indexes in `sqlite_master`. Keys are `(columns…, rowid)` sorted with

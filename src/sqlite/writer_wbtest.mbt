@@ -330,3 +330,36 @@ test "writer: 非法页大小被拒绝" {
   }
   assert_true(raised)
 }
+
+test "writer: 多列索引按列序 + rowid 排序" {
+  let rows : Array[RowSpec] = [
+    RowSpec::new(None, [VInt(Int64::from_int(1)), VText("b"), VInt(Int64::from_int(2))]),
+    RowSpec::new(None, [VInt(Int64::from_int(2)), VText("a"), VInt(Int64::from_int(9))]),
+    RowSpec::new(None, [VInt(Int64::from_int(3)), VText("a"), VInt(Int64::from_int(1))]),
+    RowSpec::new(None, [VInt(Int64::from_int(4)), VText("a"), VInt(Int64::from_int(5))]),
+  ]
+  let idxs : Array[IndexSpec] = [
+    IndexSpec::new(
+      "ix_ab", "m", "CREATE INDEX ix_ab ON m(a, b)", ["a", "b"],
+    ),
+  ]
+  let tables : Array[TableSpec] = [
+    TableSpec::with_indexes(
+      "m",
+      "CREATE TABLE m(id integer primary key, a text, b integer)",
+      rows,
+      idxs,
+    ),
+  ]
+  let pager = Pager::open(make_db(tables))
+  let idx = build_schema(pager).indexes()[0]
+  let keys = index_keys(pager, idx.rootpage)
+  assert_eq(keys.length(), 4)
+  // (a, b, rowid)：a 升序，同 a 时 b 升序
+  assert_eq(keys[0][0].to_display(), "a")
+  assert_eq(keys[0][1].to_display(), "1")
+  assert_eq(keys[1][1].to_display(), "5")
+  assert_eq(keys[2][1].to_display(), "9")
+  assert_eq(keys[3][0].to_display(), "b")
+  assert_eq(keys[3][2].to_display(), "1")
+}

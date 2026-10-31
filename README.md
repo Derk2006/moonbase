@@ -34,7 +34,7 @@ inverse of the parser and reuses it for self-verification. MoonBase is a
 | Writer — configurable page size (512 … 65536) | ✅ implemented, incl. the 65536 → `1` header special case |
 | Structure self-check — `verify_db` / CLI `check` | ✅ implemented, catches broken pages / duplicated page refs / orphan pages |
 | SQL export — `dump-sql` | ✅ implemented, replay-verified by official `sqlite3` |
-| Unit tests | ✅ 34 passing (`moon test`) |
+| Unit tests | ✅ 35 passing (`moon test`) |
 | CI | ✅ GitHub Actions (`moon check` / `moon test` / js + wasm-gc builds) |
 | License | ✅ Apache-2.0 (`LICENSE`) |
 | Cross-backend | ✅ pure MoonBit, zero FFI (js / wasm-gc / wasm / native) |
@@ -68,7 +68,7 @@ moonbase/
 │   ├── verify.mbt         Structure self-check: page ownership, page types, key ordering, overflow chains, freelist
 │   ├── export.mbt         Export a whole database as a replayable SQL script (export_sql)
 │   ├── value_wbtest.mbt   10 reader unit tests
-│   ├── writer_wbtest.mbt  13 writer tests (round-trip, float64, overflow, multi-leaf, multi-table, index ordering/separators, 3-level trees, page sizes)
+│   ├── writer_wbtest.mbt  14 writer tests (round-trip, float64, overflow, multi-leaf, multi-table, index ordering/separators, 3-level trees, page sizes)
 │   ├── verify_wbtest.mbt  5 self-check tests (clean db, overflow, multi-level, two corruption cases)
 │   └── export_wbtest.mbt  6 export / SQL-literal tests
 └── cmd/moonbase-cli/      CLI demo (js backend; Node fs for real file I/O)
@@ -93,7 +93,7 @@ moonbase/
 | **Self-check** | `verify_db(db)` / `moonbase-cli check`: walks every tree itself and validates file length vs page count, page ownership (no page referenced twice), page types vs tree kind, strict key/rowid ordering, overflow-chain completeness, freelist and orphan pages. Works on files produced by *official* `sqlite3` too (freelist, overflow, `WITHOUT ROWID`). | ✅ |
 | **Export** | `export_sql` / CLI `dump-sql`: dump a whole database as a SQL script (`CREATE` + `INSERT` + `CREATE INDEX` + `COMMIT`); the official `sqlite3` replays it to identical rows (`PRAGMA integrity_check = ok`). | ✅ |
 | **FFI** | **None** — pure MoonBit, cross-compiles to js / wasm / native | ✅ |
-| **Tests** | 34 unit tests (10 reader + 13 writer + 5 self-check + 6 export); writer output verified re-readable by the in-tree reader **and** by official `sqlite3` fixtures | ✅ |
+| **Tests** | 35 unit tests (10 reader + 14 writer + 5 self-check + 6 export); writer output verified re-readable by the in-tree reader **and** by official `sqlite3` fixtures | ✅ |
 
 ## Repository
 
@@ -171,7 +171,8 @@ subset, limitations, and verification steps.
 
 | Document | Contents |
 |---|---|
-| [docs/USAGE.md](docs/USAGE.md) | Full usage guide: CLI, read API, writer API, export, limitations |
+| [docs/USAGE.md](docs/USAGE.md) | Full usage guide: CLI, read API, writer API, self-check, export, limitations |
+| [docs/FORMAT_NOTES.md](docs/FORMAT_NOTES.md) | Byte-level notes: page layout, cell formats, separator semantics, multi-level packing, self-check invariants |
 | [CHANGELOG.md](CHANGELOG.md) | Release history and notable fixes |
 
 ## Example (against a real `sqlite3`-generated file)
