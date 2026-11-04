@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **VACUUM-style compaction**: `vacuum(db, page_size)` and the CLI
+  `vacuum <in.db> <out.db> [page]` rebuild a database into a compact, freelist-free
+  equivalent. It reads schema + rows (preserving rowids and `INTEGER PRIMARY KEY`
+  aliases) plus indexes, then re-emits them through the writer, which never produces
+  free pages. Verified against the official `sqlite3`: a 177-page database with a
+  non-empty freelist compacts to 89 pages with `PRAGMA integrity_check = ok`,
+  `PRAGMA freelist_count = 0`, identical rows, intact BLOBs and a usable index.
+  `WITHOUT ROWID` tables are rejected with `Unsupported` (documented, not faked).
+- **Query engine**: `DISTINCT` (row-level dedup after projection),
+  `ORDER BY … NULLS FIRST | NULLS LAST`, and `COUNT(DISTINCT col)` aggregate,
+  with 5 new unit tests.
 - **Query engine extensions**: `LIKE` / `NOT LIKE` (with `%` and `_` wildcards,
   ASCII case-insensitive), `IN (...)` / `NOT IN (...)`, and `BETWEEN … AND …`
   predicates in `WHERE`; aggregates `SUM`, `AVG`, `MIN`, `MAX` (in addition to

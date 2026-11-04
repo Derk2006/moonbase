@@ -9,6 +9,7 @@
 ///   moonbase-cli dump-sql <file.db>            导出整库为 SQL 脚本（可直接喂给 sqlite3）
 ///   moonbase-cli index  <file.db> <index>      打印一只索引的全部条目
 ///   moonbase-cli check  <file.db>              结构自检（不依赖官方 sqlite3）
+///   moonbase-cli vacuum <in.db> <out.db> [页大小]  紧凑化（消除空闲页 / 碎片）
 ///   moonbase-cli make   <out.db> [行数] [页大小] [编码]  用纯 MoonBit 生成一份合法 .db（含索引）
 
 fn usage() -> Unit {
@@ -23,6 +24,7 @@ fn usage() -> Unit {
   println("  moonbase-cli dump-sql <file.db>           导出整库为 SQL 脚本（> out.sql）")
   println("  moonbase-cli index  <file.db> <index>     打印一只索引的全部条目")
   println("  moonbase-cli check  <file.db>             结构自检（不依赖官方 sqlite3）")
+  println("  moonbase-cli vacuum <in.db> <out.db> [页大小]  紧凑化（消除空闲页 / 碎片）")
   println("  moonbase-cli make   <out.db> [行数] [页大小] [编码]  用纯 MoonBit 生成一份合法 .db（含索引）")
   println("                     编码：1=UTF-8（默认） 2=UTF-16le 3=UTF-16be")
 }
@@ -162,6 +164,7 @@ fn cmd_index(db : @sqlite.Db, name : String) -> Unit {
 fn is_command(s : String) -> Bool {
   let commands = [
     "header", "schema", "tree", "query", "dump", "dump-sql", "index", "make", "check",
+    "vacuum",
   ]
   for c in commands {
     if c == s {
@@ -225,6 +228,28 @@ fn cmd_check(db : @sqlite.Db) -> Unit {
       println("  - \{p}")
     }
   }
+}
+
+fn cmd_vacuum(db : @sqlite.Db, out_path : String, page_size : Int) -> Unit {
+  let ps = if page_size <= 0 { 4096 } else { page_size }
+  let before = db.pager().page_count()
+  let bytes = @sqlite.vacuum(db, ps) catch {
+    e => {
+      println("VACUUM 失败：\{e.message()}")
+      return
+    }
+  }
+  let after = @sqlite.Pager::open(bytes) catch {
+    e => {
+      println("VACUUM 结果校验失败：\{e.message()}")
+      return
+    }
+  }
+  write_file(out_path, bytes)
+  println(
+    "已紧凑化：\{before} 页 → \{after.page_count()} 页（页大小 \{ps}，\{bytes.length()} 字节）",
+  )
+  println("已写入 \{out_path}，可用官方 sqlite3 校验：sqlite3 \{out_path} \"PRAGMA integrity_check\"")
 }
 
 fn cmd_make(path : String, row_count : Int, page_size : Int, enc : Int) -> Unit {
@@ -380,6 +405,13 @@ fn main {
     cmd_index(db, args[at + 2])
   } else if cmd == "check" {
     cmd_check(db)
+  } else if cmd == "vacuum" && at + 2 < args.length() {
+    let page_size = if at + 3 < args.length() {
+      parse_count(args[at + 3])
+    } else {
+      0
+    }
+    cmd_vacuum(db, args[at + 2], page_size)
   } else {
     usage()
   }

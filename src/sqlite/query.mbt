@@ -36,6 +36,7 @@ pub(all) enum QExpr {
 pub(all) enum AggKind {
   CountStar
   CountOne
+  CountDistinct
   Sum
   Avg
   Min
@@ -48,8 +49,16 @@ pub(all) enum SelectItem {
   Agg(AggKind, String)
 }
 
+/// NULL 在 ORDER BY 中的位置：默认（升序时 NULL 在前，SQLite 默认）、
+/// 显式 FIRST、显式 LAST
+pub(all) enum NullsOrder {
+  Default
+  First
+  Last
+}
+
 pub(all) enum OrderSpec {
-  OrderBy(String, Bool)
+  OrderBy(String, Bool, NullsOrder)
 }
 
 pub struct SelectQ {
@@ -59,6 +68,7 @@ pub struct SelectQ {
   order : Array[OrderSpec]
   limit : Int?
   offset : Int?
+  distinct : Bool
 }
 
 pub struct ResultSet {
@@ -301,6 +311,11 @@ fn parse_select_item(c : Cursor) -> SelectItem raise DbError {
       c.expect_sym(")")
       return Agg(CountStar, "*")
     }
+    if c.take_word("DISTINCT") {
+      let col = c.word()
+      c.expect_sym(")")
+      return Agg(CountDistinct, col)
+    }
     let col = c.word()
     c.expect_sym(")")
     return Agg(CountOne, col)
@@ -346,8 +361,10 @@ pub fn parse_select(sql : String) -> SelectQ raise DbError {
   let c : Cursor = { toks, pos: 0 }
   c.expect_word("SELECT")
   let items : Array[SelectItem] = []
+  let mut distinct = false
   if c.at_word("DISTINCT") {
     ignore(c.advance())
+    distinct = true
   }
   while true {
     items.push(parse_select_item(c))
@@ -392,10 +409,10 @@ pub fn parse_select(sql : String) -> SelectQ raise DbError {
       _ => raise BadSql("OFFSET 后需要整数")
     }
   }
-  { items, table, cond, order, limit, offset }
+  { items, table, cond, order, limit, offset, distinct }
 }
 
-/// 解析一个 ORDER BY 项：列名 + 可选 ASC/DESC
+/// 解析一个 ORDER BY 项：列名 + 可选 ASC/DESC + 可选 NULLS FIRST/LAST
 fn parse_order_spec(c : Cursor) -> OrderSpec raise DbError {
   let col = c.word()
   let desc = if c.take_word("DESC") {
@@ -404,7 +421,17 @@ fn parse_order_spec(c : Cursor) -> OrderSpec raise DbError {
     ignore(c.take_word("ASC"))
     false
   }
-  OrderBy(col, desc)
+  let nulls = if c.take_word("NULLS") {
+    if c.take_word("FIRST") {
+      NullsOrder::First
+    } else {
+      c.expect_word("LAST")
+      NullsOrder::Last
+    }
+  } else {
+    NullsOrder::Default
+  }
+  OrderBy(col, desc, nulls)
 }
 
 /// 三值逻辑：None 表示 NULL
@@ -582,13 +609,13 @@ fn eval_q(e : QExpr, row : RowData, t : TableDef) -> Value raise DbError {
 }
 
 /// 比较两行的多个排序列：返回 -1/0/1。
-/// `cols` 为 (列下标, 是否降序)；-1 表示 rowid。
+/// `specs` 为 (列下标, 是否降序, NULL 位置)；-1 表示 rowid。
 fn cmp_row_by(
   a : RowData,
   b : RowData,
-  specs : Array[(Int, Bool)]
+  specs : Array[(Int, Bool, NullsOrder)]
 ) -> Int {
-  for (idx, desc) in specs {
+  for (idx, desc, nulls) in specs {
     let c = if idx < 0 {
       if a.rowid < b.rowid {
         -1
@@ -602,6 +629,31 @@ fn cmp_row_by(
       let vb = if idx < b.values.length() { b.values[idx] } else { VNull }
       va.compare(vb)
     }
+    // NULL 排序单独处理：位置语义已含升降序，直接返回，不再经 desc 翻转。
+    if idx >= 0 {
+      let va = if idx < a.values.length() { a.values[idx] } else { VNull }
+      let vb = if idx < b.values.length() { b.values[idx] } else { VNull }
+      match (va.is_null(), vb.is_null()) {
+        (true, true) => continue
+        (true, false) => {
+          let first = match nulls {
+            NullsOrder::First => true
+            NullsOrder::Last => false
+            NullsOrder::Default => !desc
+          }
+          return if first { -1 } else { 1 }
+        }
+        (false, true) => {
+          let first = match nulls {
+            NullsOrder::First => true
+            NullsOrder::Last => false
+            NullsOrder::Default => !desc
+          }
+          return if first { 1 } else { -1 }
+        }
+        (false, false) => ()
+      }
+    }
     if c != 0 {
       return if desc { -c } else { c }
     }
@@ -609,8 +661,8 @@ fn cmp_row_by(
   0
 }
 
-/// 稳定的自底向上归并排序（多列 ORDER BY）
-fn sort_rows_multi(rows : Array[RowData], specs : Array[(Int, Bool)]) -> Unit {
+/// 稳定的自底向上归并排序（多列 ORDER BY，含 NULLS FIRST/LAST）
+fn sort_rows_multi(rows : Array[RowData], specs : Array[(Int, Bool, NullsOrder)]) -> Unit {
   let n = rows.length()
   if n < 2 {
     return
@@ -774,6 +826,26 @@ fn agg_value(kind : AggKind, rows : Array[RowData], idx : Int) -> Value {
       }
       VInt(Int64::from_int(cnt))
     }
+    CountDistinct => {
+      let seen : Array[Value] = []
+      for r in rows {
+        let v = if idx < r.values.length() { r.values[idx] } else { VNull }
+        if v.is_null() {
+          continue
+        }
+        let mut dup = false
+        for s in seen {
+          if s.same(v) {
+            dup = true
+            break
+          }
+        }
+        if !dup {
+          seen.push(v)
+        }
+      }
+      VInt(Int64::from_int(seen.length()))
+    }
     CountStar => VInt(Int64::from_int(rows.length()))
   }
 }
@@ -782,6 +854,7 @@ fn agg_label(kind : AggKind, col : String) -> String {
   match kind {
     CountStar => "COUNT(*)"
     CountOne => "COUNT(\{col})"
+    CountDistinct => "COUNT(DISTINCT \{col})"
     Sum => "SUM(\{col})"
     Avg => "AVG(\{col})"
     Min => "MIN(\{col})"
@@ -820,12 +893,12 @@ pub fn run_select(db : Db, q : SelectQ) -> ResultSet raise DbError {
       _ => ()
     }
   }
-  // ORDER BY（支持多列）
+  // ORDER BY（支持多列 + NULLS FIRST/LAST）
   if q.order.length() > 0 {
-    let specs : Array[(Int, Bool)] = []
+    let specs : Array[(Int, Bool, NullsOrder)] = []
     for o in q.order {
       match o {
-        OrderBy(col, desc) => specs.push((resolve_order_col(t, col), desc))
+        OrderBy(col, desc, nulls) => specs.push((resolve_order_col(t, col), desc, nulls))
       }
     }
     sort_rows_multi(rows, specs)
@@ -884,7 +957,44 @@ pub fn run_select(db : Db, q : SelectQ) -> ResultSet raise DbError {
     }
     out_rows.push(vals)
   }
+  // DISTINCT：按整行去重（语义对齐 SQLite，作用于投影后的行）
+  if q.distinct {
+    let dedup : Array[Array[Value]] = []
+    for row in out_rows {
+      let mut dup = false
+      for seen in dedup {
+        if row_same(seen, row) {
+          dup = true
+          break
+        }
+      }
+      if !dup {
+        dedup.push(row)
+      }
+    }
+    return { columns: out_cols, rows: dedup }
+  }
   { columns: out_cols, rows: out_rows }
+}
+
+/// 判断两行值是否逐列相等（NULL 与 NULL 相等）
+fn row_same(a : Array[Value], b : Array[Value]) -> Bool {
+  if a.length() != b.length() {
+    return false
+  }
+  for i = 0; i < a.length(); i = i + 1 {
+    let (va, vb) = (a[i], b[i])
+    match (va.is_null(), vb.is_null()) {
+      (true, true) => continue
+      (true, false) => return false
+      (false, true) => return false
+      (false, false) =>
+        if va.compare(vb) != 0 {
+          return false
+        }
+    }
+  }
+  true
 }
 
 /// 一步执行：解析 + 查询

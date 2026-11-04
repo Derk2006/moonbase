@@ -104,3 +104,68 @@ test "query: 聚合与 WHERE 组合" {
   let rs = query(db, "SELECT COUNT(*) FROM users WHERE score >= 88")
   assert_eq(rs.rows()[0][0].to_display(), "4")
 }
+
+/// 构造一张含 NULL 与重复值的表，供 DISTINCT / NULLS 排序 / COUNT(DISTINCT) 测试
+fn null_dup_db() -> Db raise DbError {
+  let rows : Array[RowSpec] = [
+    RowSpec::new(None, [VInt(Int64::from_int(1)), VText("a"), VNull]),
+    RowSpec::new(None, [VInt(Int64::from_int(2)), VText("b"), VInt(Int64::from_int(10))]),
+    RowSpec::new(None, [VInt(Int64::from_int(3)), VText("a"), VNull]),
+    RowSpec::new(None, [VInt(Int64::from_int(4)), VText("c"), VInt(Int64::from_int(10))]),
+    RowSpec::new(None, [VInt(Int64::from_int(5)), VText("a"), VInt(Int64::from_int(20))]),
+  ]
+  let tables : Array[TableSpec] = [
+    TableSpec::new(
+      "t",
+      "CREATE TABLE t(id integer primary key, grp text, val int)",
+      rows,
+    ),
+  ]
+  Db::open(make_db(tables))
+}
+
+test "query: DISTINCT 去重" {
+  let db = null_dup_db()
+  let rs = query(db, "SELECT DISTINCT grp FROM t ORDER BY grp")
+  assert_eq(rs.rows().length(), 3)
+  assert_eq(rs.rows()[0][0].to_display(), "a")
+  assert_eq(rs.rows()[1][0].to_display(), "b")
+  assert_eq(rs.rows()[2][0].to_display(), "c")
+}
+
+test "query: COUNT(DISTINCT) 聚合" {
+  let db = null_dup_db()
+  let rs = query(db, "SELECT COUNT(DISTINCT grp) FROM t")
+  assert_eq(rs.rows()[0][0].to_display(), "3")
+  // val 列：10 出现两次、20 一次、NULL 忽略 → 2
+  let rs2 = query(db, "SELECT COUNT(DISTINCT val) FROM t")
+  assert_eq(rs2.rows()[0][0].to_display(), "2")
+}
+
+test "query: ORDER BY 默认 NULL 在前（升序）" {
+  let db = null_dup_db()
+  // SQLite 默认：升序时 NULL 排最前
+  let rs = query(db, "SELECT id FROM t ORDER BY val ASC")
+  // NULL 的两行（id 1、3）在前，其后 10（id 2、4）、20（id 5）
+  assert_eq(rs.rows()[0][0].to_display(), "1")
+  assert_eq(rs.rows()[1][0].to_display(), "3")
+  assert_eq(rs.rows()[4][0].to_display(), "5")
+}
+
+test "query: ORDER BY NULLS LAST" {
+  let db = null_dup_db()
+  let rs = query(db, "SELECT id FROM t ORDER BY val ASC NULLS LAST")
+  // 非 NULL 在前：10（2、4）、20（5），NULL 最后（1、3）
+  assert_eq(rs.rows()[0][0].to_display(), "2")
+  assert_eq(rs.rows()[3][0].to_display(), "1")
+  assert_eq(rs.rows()[4][0].to_display(), "3")
+}
+
+test "query: ORDER BY DESC 默认 NULL 在后" {
+  let db = null_dup_db()
+  let rs = query(db, "SELECT id FROM t ORDER BY val DESC")
+  // 降序时 NULL 默认最后
+  assert_eq(rs.rows()[0][0].to_display(), "5")
+  assert_eq(rs.rows()[3][0].to_display(), "1")
+  assert_eq(rs.rows()[4][0].to_display(), "3")
+}

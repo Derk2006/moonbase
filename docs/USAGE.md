@@ -358,13 +358,16 @@ Text is escaped per the SQL standard (single quotes doubled), BLOBs are emitted 
 
 **Queries**
 
-- `SELECT` with column projection and `AS` aliases;
-- Aggregates: `COUNT(*)`, `COUNT(col)`, `SUM`, `AVG`, `MIN`, `MAX`;
+- `SELECT` with column projection and `AS` aliases, plus `DISTINCT`
+  (row-level deduplication applied after projection);
+- Aggregates: `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `SUM`, `AVG`,
+  `MIN`, `MAX`;
 - `WHERE` with `= <> < <= > >= AND OR NOT IS [NOT] NULL` (three-valued logic),
   plus `LIKE` / `NOT LIKE` (`%` and `_` wildcards), `IN (...)` / `NOT IN (...)`,
   and `BETWEEN … AND …`;
-- `ORDER BY … ASC|DESC` (SQLite BINARY collation, code-point-wise), multiple
-  columns supported;
+- `ORDER BY … ASC|DESC [NULLS FIRST|LAST]` (SQLite BINARY collation,
+  code-point-wise), multiple columns supported; `NULLS` defaults to first on
+  ascending and last on descending, matching SQLite;
 - `LIMIT n [OFFSET m]`.
 
 **Writer**
@@ -375,6 +378,13 @@ Text is escaped per the SQL standard (single quotes doubled), BLOBs are emitted 
   UTF-16BE) via `make_db_with_page_size` / `make_db_with_encoding`.
 - Composite (multi-column) indexes and `UNIQUE` indexes via `IndexSpec::new`
   (multi-column) and `IndexSpec::new_unique`.
+
+**VACUUM-style compaction**
+
+- `vacuum(db, page_size)` / `moonbase-cli vacuum <in> <out> [page]` rebuild a
+  database into a compact, freelist-free equivalent, preserving rows (rowids and
+  `INTEGER PRIMARY KEY` aliases included) and indexes. The writer never emits
+  free pages, so the output is naturally compact.
 
 ## 7. Limitations
 
@@ -388,7 +398,10 @@ Text is escaped per the SQL standard (single quotes doubled), BLOBs are emitted 
 - The writer supports page sizes 512 … 65536 (2^k) and UTF-8 / UTF-16LE /
   UTF-16BE text encodings, and builds arbitrarily deep B-trees (multi-level
   interior pages) for both tables and indexes.
-- Free-page reuse / `VACUUM` are not implemented.
+- `VACUUM`-style compaction (`vacuum`) rebuilds a database into a compact
+  freelist-free equivalent, but does **not** compact `WITHOUT ROWID` tables
+  (rejected with `Unsupported`), and does not rebuild views or
+  `AUTOINCREMENT`'s `sqlite_sequence` bookkeeping.
 - Loading extensions, triggers, and virtual tables are out of scope.
 
 ## 8. Error handling

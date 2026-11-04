@@ -37,7 +37,9 @@ inverse of the parser and reuses it for self-verification. MoonBase is a
 | Structure self-check — `verify_db` / CLI `check` | ✅ implemented, catches broken pages / duplicated page refs / orphan pages |
 | SQL export — `dump-sql` | ✅ implemented, replay-verified by official `sqlite3` |
 | Query — `LIKE`/`IN`/`BETWEEN`, `SUM`/`AVG`/`MIN`/`MAX`, `OFFSET`, multi-column `ORDER BY` | ✅ implemented, unit-tested |
-| Unit tests | ✅ 50 passing (`moon test`) |
+| Query — `DISTINCT`, `ORDER BY … NULLS FIRST|LAST`, `COUNT(DISTINCT col)` | ✅ implemented, unit-tested |
+| VACUUM-style compaction — `vacuum` / CLI `vacuum` | ✅ implemented, freelist-free output verified by official `sqlite3` |
+| Unit tests | ✅ 59 passing (`moon test`) |
 | CI | ✅ GitHub Actions (`moon check` / `moon test` / js + wasm-gc builds) |
 | License | ✅ Apache-2.0 (`LICENSE`) |
 | Cross-backend | ✅ pure MoonBit, zero FFI (js / wasm-gc / wasm / native) |
@@ -86,7 +88,7 @@ moonbase/
 | **Record** | Serial types 0/1–6/7/8/9, signed ints, float64, UTF-8 & UTF-16 text, BLOB | ✅ |
 | **B-tree** | leaf-table / interior-table / leaf-index / interior-index; local-payload formula; overflow chains with cycle guard | ✅ |
 | **Schema** | `sqlite_master` scan; `CREATE TABLE` parser tolerant of constraints; `INTEGER PRIMARY KEY` → rowid alias; `WITHOUT ROWID` | ✅ |
-| **Query** | `SELECT *`, column projection + `AS`, `COUNT(*)`/`COUNT(col)`, `SUM`/`AVG`/`MIN`/`MAX`, `WHERE` (`= <> < <= > >= AND OR NOT IS [NOT] NULL` + `LIKE`/`NOT LIKE`/`IN`/`NOT IN`/`BETWEEN`), `ORDER BY … ASC|DESC` (multi-column), `LIMIT n [OFFSET m]` | ✅ |
+| **Query** | `SELECT *`, column projection + `AS`, `COUNT(*)`/`COUNT(col)`/`COUNT(DISTINCT col)`, `SUM`/`AVG`/`MIN`/`MAX`, `WHERE` (`= <> < <= > >= AND OR NOT IS [NOT] NULL` + `LIKE`/`NOT LIKE`/`IN`/`NOT IN`/`BETWEEN`), `ORDER BY … ASC|DESC [NULLS FIRST|LAST]` (multi-column), `LIMIT n [OFFSET m]`, `DISTINCT` (row-level dedup) | ✅ |
 | **Collation** | Code-point-wise text compare (matches SQLite, *not* MoonBit's length-first order) | ✅ |
 | **Writer** | `make_db(Tables)` materialises a valid `.db` **from scratch** in pure MoonBit: 100-byte header, leaf/interior table B-trees, records, overflow-page chains, `sqlite_master` rows; `INTEGER PRIMARY KEY` rowid aliasing, auto rowid, multi-table. Output re-opens in official `sqlite3`. | ✅ |
 | **Writer — indexes** | `IndexSpec` / `TableSpec::with_indexes` emit real index B-trees (leaf type 10, interior type 2): keys sorted with SQLite semantics (`NULL < number < text < BLOB`, rowid tie-break), separators promoted out of leaves, payload overflow supported. Verified by `PRAGMA integrity_check` and by the planner choosing the index. | ✅ |
@@ -96,9 +98,10 @@ moonbase/
 | **Writer — composite & UNIQUE indexes** | `IndexSpec::new(name, table, sql, ["a","b"])` builds multi-column index keys `(a,b,rowid)`; `IndexSpec::new_unique` emits a `UNIQUE` index recognised by `parse_index` on read-back. | ✅ |
 | **Writer — sorting** | Row and index ordering uses a stable bottom-up merge sort (`O(n log n)`), so 100 000-row files build in ~1 s instead of degrading quadratically. | ✅ |
 | **Self-check** | `verify_db(db)` / `moonbase-cli check`: walks every tree itself and validates file length vs page count, page ownership (no page referenced twice), page types vs tree kind, strict key/rowid ordering, overflow-chain completeness, freelist and orphan pages. Works on files produced by *official* `sqlite3` too (freelist, overflow, `WITHOUT ROWID`). | ✅ |
+| **VACUUM-style compaction** | `vacuum(db, page_size)` / `moonbase-cli vacuum <in> <out> [page]` rebuilds a database into a compact freelist-free equivalent, preserving rows (and rowids / `INTEGER PRIMARY KEY` aliases) and indexes. A 177-page official-`sqlite3` database with a non-empty freelist compacts to 89 pages with `integrity_check = ok` and `freelist_count = 0`. `WITHOUT ROWID` is rejected with `Unsupported`. | ✅ |
 | **Export** | `export_sql` / CLI `dump-sql`: dump a whole database as a SQL script (`CREATE` + `INSERT` + `CREATE INDEX` + `COMMIT`); the official `sqlite3` replays it to identical rows (`PRAGMA integrity_check = ok`). | ✅ |
 | **FFI** | **None** — pure MoonBit, cross-compiles to js / wasm / native | ✅ |
-| **Tests** | 50 unit tests (10 reader + 14 writer + 5 self-check + 6 export + 11 query + 4 encoding/unique); writer output verified re-readable by the in-tree reader **and** by official `sqlite3` fixtures | ✅ |
+| **Tests** | 59 unit tests (10 reader + 14 writer + 5 self-check + 6 export + 16 query + 4 encoding/unique + 4 vacuum); writer output verified re-readable by the in-tree reader **and** by official `sqlite3` fixtures | ✅ |
 
 ## Repository
 
@@ -130,6 +133,7 @@ moonbase-cli dump   <file.db> <table>       export the whole table (pipe-separat
 moonbase-cli dump-sql <file.db>             export the whole database as a SQL script
 moonbase-cli index  <file.db> <index>       list every entry of an index (key… + rowid)
 moonbase-cli check  <file.db>               structural self-check (no sqlite3 needed)
+moonbase-cli vacuum <in.db> <out.db> [page] compact a database (drop freelist / dead space)
 moonbase-cli make   <out.db> [rows] [page] [enc]  generate a legal .db from scratch, with an index
                                                enc: 1=UTF-8 (default), 2=UTF-16le, 3=UTF-16be
 ```
