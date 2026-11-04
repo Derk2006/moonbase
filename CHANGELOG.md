@@ -8,70 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **Multi-level B-trees in the writer**: pages are now packed level by level, so
-  tables and indexes are no longer limited to a single interior page. Table
-  B-trees copy the left-subtree maximum rowid as a routing key; index B-trees
-  move the separator out of the page below so that every key exists exactly once.
-  Verified with 20 000 rows on 512-byte pages (3-level table tree, 4-level index
-  tree, `PRAGMA integrity_check = ok`) and 100 000 rows on 4 KiB pages.
-- **Configurable page size**: `make_db_with_page_size(tables, 512 … 65536)` and
-  `moonbase-cli make <out.db> [rows] [page]`. The value flows into the header,
-  the usable page space, the overflow threshold and the fan-out; 65536 is encoded
-  as `1` in the 2-byte header field as the format requires. Invalid sizes raise
-  `BadSql`.
-- **Structure self-check**: `verify_db(db)` and `moonbase-cli check <file.db>`
-  walk the file independently of the query path and validate file length vs page
-  count, page ownership (no page referenced twice), page type vs tree kind,
-  strict rowid / index-key ordering, overflow-chain completeness, freelist pages
-  and orphan pages. Works on files produced by the official `sqlite3` (freelist,
-  overflow, `WITHOUT ROWID`) and rejects deliberately corrupted copies.
-- **O(n log n) sorting**: row and index ordering switched from insertion sort to
-  a stable bottom-up merge sort, making 100 000-row files build in about a
-  second instead of degrading quadratically.
-- `writer_tree.mbt` (page arena + level packing) and `verify.mbt`, with 10 new
-  unit tests (35 in total).
-- **Index B-trees in the writer**: `IndexSpec` + `TableSpec::with_indexes` emit
-  real index trees (leaf page type 10, interior page type 2) instead of merely
-  declaring indexes in `sqlite_master`. Keys are `(columns…, rowid)` sorted with
-  SQLite's type order, separators are promoted out of leaves, and index payloads
-  can overflow. Verified by the official SQLite: `PRAGMA integrity_check = ok`,
-  `PRAGMA index_list` lists the index, `EXPLAIN QUERY PLAN` reports
-  `USING COVERING INDEX`, and `SELECT count(*) ... INDEXED BY` matches the table.
-- **CLI `index`**: `moonbase-cli index <file.db> <index>` prints every index
-  entry. It also reads indexes written by the official `sqlite3` (a 500-entry
-  multi-page index round-trips with identical entries and order).
-- **CLI `make <out.db> [rows]`**: optional row count, so a multi-page index can be
-  generated on demand (`make out.db 400`).
-- `Db::index_entries(name)`, `Db::index_names()`, plus `IndexDef` accessors, so
-  index inspection is available outside the defining package.
-- **SQL export**: `export_sql(db)` / CLI `dump-sql` dumps a whole database as a
-  replayable SQL script (`CREATE` + `INSERT` + `CREATE INDEX` + `COMMIT`). Verified
-  by replaying the output through the official `sqlite3` and comparing every row.
-- **Public writer constructors**: `TableSpec::new(...)` and `RowSpec::new(...)`,
-  so the writer is usable from other packages (struct fields are read-only outside
-  the defining package). The CLI now builds its demo database through this public
-  API, serving as a usage example.
-- `docs/USAGE.md`: a complete usage guide covering the CLI, the read API, the
-  writer API, export, the supported subset, limitations and verification steps.
-- Continuous integration: `moon check`, `moon test` and `moon build --target js`
-  on every push and pull request. The CI also runs an **end-to-end interop check**
-  (`scripts/e2e_check.py`): it generates a `.db` with the MoonBase CLI and replays
-  its exported SQL through the official SQLite, asserting identical rows and
-  `PRAGMA integrity_check = ok`.
+- **Query engine extensions**: `LIKE` / `NOT LIKE` (with `%` and `_` wildcards,
+  ASCII case-insensitive), `IN (...)` / `NOT IN (...)`, and `BETWEEN … AND …`
+  predicates in `WHERE`; aggregates `SUM`, `AVG`, `MIN`, `MAX` (in addition to
+  `COUNT(*)` / `COUNT(col)`); `LIMIT n OFFSET m` pagination; and multi-column
+  `ORDER BY`. All are covered by 11 new unit tests.
+- **Writer text encoding**: `make_db_with_encoding(tables, page_size, enc)` and
+  the CLI `make <out.db> [rows] [page] [enc]` generate UTF-8 / UTF-16LE /
+  UTF-16BE databases. The encoding is written to header byte 56 and drives the
+  serial-type-13 text bodies. Output re-opens in the official `sqlite3` with the
+  correct `PRAGMA encoding` and `PRAGMA integrity_check = ok`.
+- **UNIQUE indexes**: `IndexSpec::new_unique(...)` emits a `UNIQUE` index; the
+  `unique` flag is recognised by `parse_index` on read-back. Composite
+  (multi-column) indexes were already supported via `IndexSpec::new` with a
+  multi-element `columns` list and are now documented and covered by tests.
 
 ### Fixed
 
-- **Index scanning dropped interior keys**: `scan_index` only emitted leaf cells,
-  so every key promoted into an interior page was lost when reading (a real
-  `sqlite3` index with multiple pages silently under-reported its entries). It now
-  walks in key order — left subtree, the interior key itself, then the right
-  subtree — and matches the official tool entry-for-entry.
-- **Record decoding of 64-bit values**: `serial_type_size` was missing the
-  `serial type 7` (float64) branch, so it fell through to the text/BLOB width
-  formula and returned a negative width. Every field *after* a `REAL` column was
-  therefore read at a wrong offset. `serial type 6` (8-byte integer) was also
-  reported as 7 bytes instead of 8. Both are fixed and covered by a regression
-  test (`export: 浮点列之后的字段不偏移`).
+- **Stale documentation**: `docs/USAGE.md` still claimed the writer was limited to
+  a 4096-byte page size, UTF-8 text and a single interior level per B-tree. Those
+  limits were removed in earlier releases (configurable page size, multi-level
+  trees); the limitation section is now corrected to reflect the actual
+  capabilities.
 
 ## [0.1.0] - 2026-10-21
 

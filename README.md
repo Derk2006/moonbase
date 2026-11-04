@@ -32,9 +32,12 @@ inverse of the parser and reuses it for self-verification. MoonBase is a
 | Writer — index B-trees (leaf type 10 / interior type 2) | ✅ implemented, `PRAGMA integrity_check = ok` + planner uses the index |
 | Writer — multi-level B-trees (interior pages of interior pages) | ✅ implemented, 100 000 rows verify `integrity_check = ok` |
 | Writer — configurable page size (512 … 65536) | ✅ implemented, incl. the 65536 → `1` header special case |
+| Writer — configurable text encoding (UTF-8 / UTF-16LE / UTF-16BE) | ✅ implemented, re-opens in official `sqlite3` |
+| Writer — composite & UNIQUE indexes | ✅ implemented, `IndexSpec::new` (multi-column) / `IndexSpec::new_unique` |
 | Structure self-check — `verify_db` / CLI `check` | ✅ implemented, catches broken pages / duplicated page refs / orphan pages |
 | SQL export — `dump-sql` | ✅ implemented, replay-verified by official `sqlite3` |
-| Unit tests | ✅ 35 passing (`moon test`) |
+| Query — `LIKE`/`IN`/`BETWEEN`, `SUM`/`AVG`/`MIN`/`MAX`, `OFFSET`, multi-column `ORDER BY` | ✅ implemented, unit-tested |
+| Unit tests | ✅ 50 passing (`moon test`) |
 | CI | ✅ GitHub Actions (`moon check` / `moon test` / js + wasm-gc builds) |
 | License | ✅ Apache-2.0 (`LICENSE`) |
 | Cross-backend | ✅ pure MoonBit, zero FFI (js / wasm-gc / wasm / native) |
@@ -83,17 +86,19 @@ moonbase/
 | **Record** | Serial types 0/1–6/7/8/9, signed ints, float64, UTF-8 & UTF-16 text, BLOB | ✅ |
 | **B-tree** | leaf-table / interior-table / leaf-index / interior-index; local-payload formula; overflow chains with cycle guard | ✅ |
 | **Schema** | `sqlite_master` scan; `CREATE TABLE` parser tolerant of constraints; `INTEGER PRIMARY KEY` → rowid alias; `WITHOUT ROWID` | ✅ |
-| **Query** | `SELECT *`, column projection + `AS`, `COUNT(*)`, `WHERE` (`= <> < <= > >= AND OR NOT IS [NOT] NULL`), `ORDER BY … ASC|DESC`, `LIMIT` | ✅ |
+| **Query** | `SELECT *`, column projection + `AS`, `COUNT(*)`/`COUNT(col)`, `SUM`/`AVG`/`MIN`/`MAX`, `WHERE` (`= <> < <= > >= AND OR NOT IS [NOT] NULL` + `LIKE`/`NOT LIKE`/`IN`/`NOT IN`/`BETWEEN`), `ORDER BY … ASC|DESC` (multi-column), `LIMIT n [OFFSET m]` | ✅ |
 | **Collation** | Code-point-wise text compare (matches SQLite, *not* MoonBit's length-first order) | ✅ |
 | **Writer** | `make_db(Tables)` materialises a valid `.db` **from scratch** in pure MoonBit: 100-byte header, leaf/interior table B-trees, records, overflow-page chains, `sqlite_master` rows; `INTEGER PRIMARY KEY` rowid aliasing, auto rowid, multi-table. Output re-opens in official `sqlite3`. | ✅ |
 | **Writer — indexes** | `IndexSpec` / `TableSpec::with_indexes` emit real index B-trees (leaf type 10, interior type 2): keys sorted with SQLite semantics (`NULL < number < text < BLOB`, rowid tie-break), separators promoted out of leaves, payload overflow supported. Verified by `PRAGMA integrity_check` and by the planner choosing the index. | ✅ |
 | **Writer — multi-level trees** | Tables and indexes are packed bottom-up into as many interior levels as needed; a separator key is always *removed* from the page below (index B-trees) or *copied* (table B-trees), matching SQLite's two different key semantics. 20 000 rows on 512-byte pages produce a 3-level table tree and a 4-level index tree, still `integrity_check = ok`. | ✅ |
 | **Writer — page size** | `make_db_with_page_size(tables, 512…65536)` — header, usable space, overflow thresholds and fan-out all follow the chosen page size; 65536 is encoded as `1` in the 2-byte header field, as the spec requires. | ✅ |
+| **Writer — text encoding** | `make_db_with_encoding(tables, page_size, 1|2|3)` — generates UTF-8 / UTF-16LE / UTF-16BE databases (header byte 56 + serial-type-13 bodies); re-opens in official `sqlite3` with the correct `PRAGMA encoding` and `integrity_check = ok`. | ✅ |
+| **Writer — composite & UNIQUE indexes** | `IndexSpec::new(name, table, sql, ["a","b"])` builds multi-column index keys `(a,b,rowid)`; `IndexSpec::new_unique` emits a `UNIQUE` index recognised by `parse_index` on read-back. | ✅ |
 | **Writer — sorting** | Row and index ordering uses a stable bottom-up merge sort (`O(n log n)`), so 100 000-row files build in ~1 s instead of degrading quadratically. | ✅ |
 | **Self-check** | `verify_db(db)` / `moonbase-cli check`: walks every tree itself and validates file length vs page count, page ownership (no page referenced twice), page types vs tree kind, strict key/rowid ordering, overflow-chain completeness, freelist and orphan pages. Works on files produced by *official* `sqlite3` too (freelist, overflow, `WITHOUT ROWID`). | ✅ |
 | **Export** | `export_sql` / CLI `dump-sql`: dump a whole database as a SQL script (`CREATE` + `INSERT` + `CREATE INDEX` + `COMMIT`); the official `sqlite3` replays it to identical rows (`PRAGMA integrity_check = ok`). | ✅ |
 | **FFI** | **None** — pure MoonBit, cross-compiles to js / wasm / native | ✅ |
-| **Tests** | 35 unit tests (10 reader + 14 writer + 5 self-check + 6 export); writer output verified re-readable by the in-tree reader **and** by official `sqlite3` fixtures | ✅ |
+| **Tests** | 50 unit tests (10 reader + 14 writer + 5 self-check + 6 export + 11 query + 4 encoding/unique); writer output verified re-readable by the in-tree reader **and** by official `sqlite3` fixtures | ✅ |
 
 ## Repository
 
@@ -125,7 +130,8 @@ moonbase-cli dump   <file.db> <table>       export the whole table (pipe-separat
 moonbase-cli dump-sql <file.db>             export the whole database as a SQL script
 moonbase-cli index  <file.db> <index>       list every entry of an index (key… + rowid)
 moonbase-cli check  <file.db>               structural self-check (no sqlite3 needed)
-moonbase-cli make   <out.db> [rows] [page]  generate a legal .db from scratch, with an index
+moonbase-cli make   <out.db> [rows] [page] [enc]  generate a legal .db from scratch, with an index
+                                               enc: 1=UTF-8 (default), 2=UTF-16le, 3=UTF-16be
 ```
 
 ## Library usage
@@ -153,8 +159,9 @@ let tables : Array[@sqlite.TableSpec] = [
     rows,
   ),
 ]
-let out_bytes = @sqlite.make_db(tables)                  // page size 4096
+let out_bytes = @sqlite.make_db(tables)                  // page size 4096, UTF-8
 let small     = @sqlite.make_db_with_page_size(tables, 512)  // 512 .. 65536
+let utf16     = @sqlite.make_db_with_encoding(tables, 4096, 2)  // 1=UTF-8, 2=UTF-16le, 3=UTF-16be
 
 // ---- self-check: walk the file structure without sqlite3 ----
 let report = @sqlite.verify_db(db)

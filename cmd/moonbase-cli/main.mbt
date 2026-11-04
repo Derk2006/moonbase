@@ -9,7 +9,7 @@
 ///   moonbase-cli dump-sql <file.db>            导出整库为 SQL 脚本（可直接喂给 sqlite3）
 ///   moonbase-cli index  <file.db> <index>      打印一只索引的全部条目
 ///   moonbase-cli check  <file.db>              结构自检（不依赖官方 sqlite3）
-///   moonbase-cli make   <out.db> [行数] [页大小]  用纯 MoonBit 生成一份合法 .db（含索引）
+///   moonbase-cli make   <out.db> [行数] [页大小] [编码]  用纯 MoonBit 生成一份合法 .db（含索引）
 
 fn usage() -> Unit {
   println("MoonBase —— 纯 MoonBit 实现的 SQLite 文件格式读取 / 生成器")
@@ -23,7 +23,8 @@ fn usage() -> Unit {
   println("  moonbase-cli dump-sql <file.db>           导出整库为 SQL 脚本（> out.sql）")
   println("  moonbase-cli index  <file.db> <index>     打印一只索引的全部条目")
   println("  moonbase-cli check  <file.db>             结构自检（不依赖官方 sqlite3）")
-  println("  moonbase-cli make   <out.db> [行数] [页大小]  用纯 MoonBit 生成一份合法 .db（含索引）")
+  println("  moonbase-cli make   <out.db> [行数] [页大小] [编码]  用纯 MoonBit 生成一份合法 .db（含索引）")
+  println("                     编码：1=UTF-8（默认） 2=UTF-16le 3=UTF-16be")
 }
 
 fn row_to_line(vals : Array[@sqlite.Value]) -> String {
@@ -226,7 +227,7 @@ fn cmd_check(db : @sqlite.Db) -> Unit {
   }
 }
 
-fn cmd_make(path : String, row_count : Int, page_size : Int) -> Unit {
+fn cmd_make(path : String, row_count : Int, page_size : Int, enc : Int) -> Unit {
   // 通过「外部包可用的公开 API」构造数据：RowSpec::new / TableSpec::with_indexes。
   // 这既是 CLI 演示，也是写入器库 API 的可用性验证。
   let n = if row_count <= 0 { 3 } else { row_count }
@@ -275,14 +276,21 @@ fn cmd_make(path : String, row_count : Int, page_size : Int) -> Unit {
     ),
   ]
   let ps = if page_size <= 0 { 4096 } else { page_size }
-  let bytes = @sqlite.make_db_with_page_size(tables, ps) catch {
+  let enc_name = if enc == 2 {
+    "UTF-16le"
+  } else if enc == 3 {
+    "UTF-16be"
+  } else {
+    "UTF-8"
+  }
+  let bytes = @sqlite.make_db_with_encoding(tables, ps, enc) catch {
     e => {
       println("生成数据库失败：\{e.message()}")
       return
     }
   }
   write_file(path, bytes)
-  println("已生成 \{path}（\{bytes.length()} 字节，页大小 \{ps}，\{bytes.length() / ps} 页）")
+  println("已生成 \{path}（\{bytes.length()} 字节，页大小 \{ps}，编码 \{enc_name}，\{bytes.length() / ps} 页）")
   // 立即用本库读回，验证自洽
   let db = @sqlite.Db::open(bytes) catch {
     e => {
@@ -341,7 +349,12 @@ fn main {
     } else {
       0
     }
-    cmd_make(path, row_count, page_size)
+    let enc = if at + 4 < args.length() {
+      parse_count(args[at + 4])
+    } else {
+      1
+    }
+    cmd_make(path, row_count, page_size, enc)
     return
   }
   let bytes = read_file(path)

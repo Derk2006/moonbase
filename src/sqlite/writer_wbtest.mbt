@@ -363,3 +363,77 @@ test "writer: 多列索引按列序 + rowid 排序" {
   assert_eq(keys[3][0].to_display(), "b")
   assert_eq(keys[3][2].to_display(), "1")
 }
+
+// ---- UNIQUE 索引 ----
+
+test "writer: UNIQUE 索引被识别为 unique" {
+  let rows : Array[RowSpec] = [
+    RowSpec::new(None, [VInt(Int64::from_int(1)), VText("a")]),
+    RowSpec::new(None, [VInt(Int64::from_int(2)), VText("b")]),
+  ]
+  let idxs : Array[IndexSpec] = [
+    IndexSpec::new_unique(
+      "ix_u", "u", "CREATE UNIQUE INDEX ix_u ON u(v)", ["v"],
+    ),
+  ]
+  let tables : Array[TableSpec] = [
+    TableSpec::with_indexes("u", "CREATE TABLE u(id integer primary key, v text)", rows, idxs),
+  ]
+  let pager = Pager::open(make_db(tables))
+  let schema = build_schema(pager)
+  let idx = schema.indexes()[0]
+  assert_true(idx.is_unique)
+  assert_eq(idx.name, "ix_u")
+  // 条目仍正确生成
+  let keys = index_keys(pager, idx.rootpage)
+  assert_eq(keys.length(), 2)
+  assert_eq(keys[0][0].to_display(), "a")
+}
+
+// ---- 文本编码 ----
+
+test "writer: UTF-16LE 编码可生成并被本库读回" {
+  let rows : Array[RowSpec] = [
+    RowSpec::new(None, [VInt(Int64::from_int(1)), VText("你好")]),
+    RowSpec::new(None, [VInt(Int64::from_int(2)), VText("hello")]),
+  ]
+  let tables : Array[TableSpec] = [
+    TableSpec::new("t", "CREATE TABLE t(id integer primary key, s text)", rows),
+  ]
+  let bytes = make_db_with_encoding(tables, 4096, 2)
+  let pager = Pager::open(bytes)
+  assert_eq(pager.text_encoding(), 2)
+  let db = Db::open(bytes)
+  let t = db.table("t")
+  let got = db.rows(t)
+  assert_eq(got.length(), 2)
+  assert_eq(got[0].values[1].to_display(), "你好")
+  assert_eq(got[1].values[1].to_display(), "hello")
+}
+
+test "writer: UTF-16BE 编码可生成并被本库读回" {
+  let rows : Array[RowSpec] = [
+    RowSpec::new(None, [VInt(Int64::from_int(1)), VText("世界")]),
+  ]
+  let tables : Array[TableSpec] = [
+    TableSpec::new("t", "CREATE TABLE t(id integer primary key, s text)", rows),
+  ]
+  let bytes = make_db_with_encoding(tables, 4096, 3)
+  let pager = Pager::open(bytes)
+  assert_eq(pager.text_encoding(), 3)
+  let db = Db::open(bytes)
+  let t = db.table("t")
+  let got = db.rows(t)
+  assert_eq(got[0].values[1].to_display(), "世界")
+}
+
+test "writer: 非法文本编码被拒绝" {
+  let tables : Array[TableSpec] = []
+  let mut raised = false
+  try {
+    let _ = make_db_with_encoding(tables, 4096, 7)
+  } catch {
+    _ => raised = true
+  }
+  assert_true(raised)
+}

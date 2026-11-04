@@ -25,22 +25,40 @@ pub(all) enum QExpr {
   QOr(QExpr, QExpr)
   QNot(QExpr)
   QIsNull(QExpr, Bool)
+  /// LIKE 模式匹配：QLike(expr, 模式字面量, 是否 NOT)
+  QLike(QExpr, String, Bool)
+  /// IN 列表：QIn(expr, 候选值列表)
+  QIn(QExpr, Array[Value])
+  /// BETWEEN：QBetween(expr, 下界, 上界)
+  QBetween(QExpr, QExpr, QExpr)
+}
+
+pub(all) enum AggKind {
+  CountStar
+  CountOne
+  Sum
+  Avg
+  Min
+  Max
 }
 
 pub(all) enum SelectItem {
   Star
   One(String)
-  CountStar
-  CountOne(String)
+  Agg(AggKind, String)
+}
+
+pub(all) enum OrderSpec {
+  OrderBy(String, Bool)
 }
 
 pub struct SelectQ {
   items : Array[SelectItem]
   table : String
   cond : QExpr?
-  order_col : String?
-  order_desc : Bool
+  order : Array[OrderSpec]
   limit : Int?
+  offset : Int?
 }
 
 pub struct ResultSet {
@@ -187,15 +205,71 @@ fn parse_q_cmp(c : Cursor) -> QExpr raise DbError {
         QIsNull(left, negate)
       } else if w.to_upper() == "NOT" {
         ignore(c.advance())
-        ignore(c.take_word("NULL"))
-        QIsNull(left, true)
+        // NOT LIKE / NOT IN / NOT NULL
+        if c.at_word("NULL") {
+          ignore(c.advance())
+          QIsNull(left, true)
+        } else if c.at_word("LIKE") {
+          ignore(c.advance())
+          let pat = parse_q_primary(c)
+          let pat_str = match pat {
+            QLit(VText(s)) => s
+            _ => raise BadSql("LIKE 需要文本模式")
+          }
+          QLike(left, pat_str, true)
+        } else if c.at_word("IN") {
+          ignore(c.advance())
+          let vals = parse_in_list(c)
+          QIn(left, vals) |> q_not
+        } else {
+          left
+        }
       } else if w.to_upper() == "LIKE" {
-        raise Unsupported("暂不支持 LIKE")
+        ignore(c.advance())
+        let pat = parse_q_primary(c)
+        let pat_str = match pat {
+          QLit(VText(s)) => s
+          _ => raise BadSql("LIKE 需要文本模式")
+        }
+        QLike(left, pat_str, false)
+      } else if w.to_upper() == "IN" {
+        ignore(c.advance())
+        QIn(left, parse_in_list(c))
+      } else if w.to_upper() == "BETWEEN" {
+        ignore(c.advance())
+        let lo = parse_q_primary(c)
+        c.expect_word("AND")
+        let hi = parse_q_primary(c)
+        QBetween(left, lo, hi)
       } else {
         left
       }
     _ => left
   }
+}
+
+/// 解析 IN 后的括号列表，返回候选值
+fn parse_in_list(c : Cursor) -> Array[Value] raise DbError {
+  c.expect_sym("(")
+  let vals : Array[Value] = []
+  while !c.at_sym(")") {
+    let p = parse_q_primary(c)
+    let v = match p {
+      QLit(x) => x
+      _ => raise BadSql("IN 列表需要字面量")
+    }
+    vals.push(v)
+    if !c.take_sym(",") {
+      break
+    }
+  }
+  c.expect_sym(")")
+  vals
+}
+
+/// 对布尔表达式取 NOT（用于 NOT IN）
+fn q_not(e : QExpr) -> QExpr {
+  QNot(e)
 }
 
 fn parse_q_and(c : Cursor) -> QExpr raise DbError {
@@ -225,11 +299,39 @@ fn parse_select_item(c : Cursor) -> SelectItem raise DbError {
     c.expect_sym("(")
     if c.take_sym("*") {
       c.expect_sym(")")
-      return CountStar
+      return Agg(CountStar, "*")
     }
     let col = c.word()
     c.expect_sym(")")
-    return CountOne(col)
+    return Agg(CountOne, col)
+  }
+  if c.at_word("SUM") {
+    ignore(c.advance())
+    c.expect_sym("(")
+    let col = c.word()
+    c.expect_sym(")")
+    return Agg(Sum, col)
+  }
+  if c.at_word("AVG") {
+    ignore(c.advance())
+    c.expect_sym("(")
+    let col = c.word()
+    c.expect_sym(")")
+    return Agg(Avg, col)
+  }
+  if c.at_word("MIN") {
+    ignore(c.advance())
+    c.expect_sym("(")
+    let col = c.word()
+    c.expect_sym(")")
+    return Agg(Min, col)
+  }
+  if c.at_word("MAX") {
+    ignore(c.advance())
+    c.expect_sym("(")
+    let col = c.word()
+    c.expect_sym(")")
+    return Agg(Max, col)
   }
   let name = c.word()
   // 忽略别名：col AS x / col x
@@ -256,20 +358,24 @@ pub fn parse_select(sql : String) -> SelectQ raise DbError {
   let mut table = ""
   if c.take_word("FROM") {
     table = c.word()
+    // 暂不支持多表 JOIN / GROUP BY / HAVING，明确报错而非静默误解
+    if c.at_word("JOIN") || c.at_word("INNER") || c.at_word("LEFT") || c.at_word("RIGHT") {
+      raise Unsupported("JOIN")
+    }
+    if c.at_word("GROUP") {
+      raise Unsupported("GROUP BY")
+    }
   }
   let mut cond : QExpr? = None
   if c.take_word("WHERE") {
     cond = Some(parse_q_expr(c))
   }
-  let mut order_col : String? = None
-  let mut order_desc = false
+  let order : Array[OrderSpec] = []
   if c.take_word("ORDER") {
     c.expect_word("BY")
-    order_col = Some(c.word())
-    if c.take_word("DESC") {
-      order_desc = true
-    } else {
-      ignore(c.take_word("ASC"))
+    order.push(parse_order_spec(c))
+    while c.take_sym(",") {
+      order.push(parse_order_spec(c))
     }
   }
   let mut limit : Int? = None
@@ -279,7 +385,26 @@ pub fn parse_select(sql : String) -> SelectQ raise DbError {
       _ => raise BadSql("LIMIT 后需要整数")
     }
   }
-  { items, table, cond, order_col, order_desc, limit }
+  let mut offset : Int? = None
+  if c.take_word("OFFSET") {
+    match c.advance() {
+      TNumber(s) => offset = Some(try @string.parse_int(s[:]) catch { _ => 0 })
+      _ => raise BadSql("OFFSET 后需要整数")
+    }
+  }
+  { items, table, cond, order, limit, offset }
+}
+
+/// 解析一个 ORDER BY 项：列名 + 可选 ASC/DESC
+fn parse_order_spec(c : Cursor) -> OrderSpec raise DbError {
+  let col = c.word()
+  let desc = if c.take_word("DESC") {
+    true
+  } else {
+    ignore(c.take_word("ASC"))
+    false
+  }
+  OrderBy(col, desc)
 }
 
 /// 三值逻辑：None 表示 NULL
@@ -291,6 +416,63 @@ fn truthy(v : Value) -> Bool? {
     VText(s) => Some(s.length() > 0)
     VBlob(b) => Some(b.length() > 0)
   }
+}
+
+/// LIKE 模式匹配：% 匹配任意序列，_ 匹配单个字符。
+/// 语义与 SQLite 默认一致：大小写不敏感（仅 ASCII），逐字符回溯匹配。
+fn like_match(s : String, pat : String) -> Bool {
+  let cs = s.to_array()
+  let ps = pat.to_array()
+  like_match_at(cs, 0, ps, 0)
+}
+
+fn lower_ascii(c : Char) -> Char {
+  if c >= 'A' && c <= 'Z' {
+    Int::unsafe_to_char(c.to_int() + 32)
+  } else {
+    c
+  }
+}
+
+fn like_match_at(cs : Array[Char], si : Int, ps : Array[Char], pi : Int) -> Bool {
+  // 主循环处理非 * 部分
+  let mut s = si
+  let mut p = pi
+  while p < ps.length() {
+    if ps[p] == '%' {
+      // 跳过连续的 %
+      while p < ps.length() && ps[p] == '%' {
+        p = p + 1
+      }
+      if p >= ps.length() {
+        return true
+      }
+      // 尝试在 s 的每个位置匹配剩余模式
+      let mut k = s
+      while k <= cs.length() {
+        if like_match_at(cs, k, ps, p) {
+          return true
+        }
+        k = k + 1
+      }
+      return false
+    }
+    if s >= cs.length() {
+      return false
+    }
+    let pc = ps[p]
+    if pc == '_' {
+      s = s + 1
+      p = p + 1
+      continue
+    }
+    if lower_ascii(cs[s]) != lower_ascii(pc) {
+      return false
+    }
+    s = s + 1
+    p = p + 1
+  }
+  s == cs.length()
 }
 
 fn eval_col(name : String, row : RowData, t : TableDef) -> Value raise DbError {
@@ -361,28 +543,249 @@ fn eval_q(e : QExpr, row : RowData, t : TableDef) -> Value raise DbError {
       let r = if negate { !is_null } else { is_null }
       VInt(Int64::from_int(if r { 1 } else { 0 }))
     }
+    QLike(a, pat, negate) => {
+      let v = eval_q(a, row, t)
+      let m = match v {
+        VText(s) => like_match(s, pat)
+        _ => false
+      }
+      let r = if negate { !m } else { m }
+      VInt(Int64::from_int(if r { 1 } else { 0 }))
+    }
+    QIn(a, vals) => {
+      let v = eval_q(a, row, t)
+      if v.is_null() {
+        VNull
+      } else {
+        let mut found = false
+        for cand in vals {
+          if v.compare(cand) == 0 {
+            found = true
+            break
+          }
+        }
+        VInt(Int64::from_int(if found { 1 } else { 0 }))
+      }
+    }
+    QBetween(a, lo, hi) => {
+      let v = eval_q(a, row, t)
+      let l = eval_q(lo, row, t)
+      let h = eval_q(hi, row, t)
+      if v.is_null() || l.is_null() || h.is_null() {
+        VNull
+      } else {
+        let r = v.compare(l) >= 0 && v.compare(h) <= 0
+        VInt(Int64::from_int(if r { 1 } else { 0 }))
+      }
+    }
   }
 }
 
-fn sort_rows(rows : Array[RowData], idx : Int, desc : Bool) -> Unit {
-  // 插入排序：行数通常不大，且无需引入额外依赖
-  let n = rows.length()
-  for i = 1; i < n; i = i + 1 {
-    let cur = rows[i]
-    let mut j = i - 1
-    while j >= 0 {
-      let a = rows[j].values[idx]
-      let b = cur.values[idx]
-      let c = a.compare(b)
-      let should_shift = if desc { c < 0 } else { c > 0 }
-      if should_shift {
-        rows[j + 1] = rows[j]
-        j = j - 1
+/// 比较两行的多个排序列：返回 -1/0/1。
+/// `cols` 为 (列下标, 是否降序)；-1 表示 rowid。
+fn cmp_row_by(
+  a : RowData,
+  b : RowData,
+  specs : Array[(Int, Bool)]
+) -> Int {
+  for (idx, desc) in specs {
+    let c = if idx < 0 {
+      if a.rowid < b.rowid {
+        -1
+      } else if a.rowid > b.rowid {
+        1
       } else {
-        break
+        0
+      }
+    } else {
+      let va = if idx < a.values.length() { a.values[idx] } else { VNull }
+      let vb = if idx < b.values.length() { b.values[idx] } else { VNull }
+      va.compare(vb)
+    }
+    if c != 0 {
+      return if desc { -c } else { c }
+    }
+  }
+  0
+}
+
+/// 稳定的自底向上归并排序（多列 ORDER BY）
+fn sort_rows_multi(rows : Array[RowData], specs : Array[(Int, Bool)]) -> Unit {
+  let n = rows.length()
+  if n < 2 {
+    return
+  }
+  let tmp : Array[RowData] = Array::make(n, rows[0])
+  let mut width = 1
+  while width < n {
+    let mut lo = 0
+    while lo < n {
+      let mid = if lo + width < n { lo + width } else { n }
+      let hi = if lo + 2 * width < n { lo + 2 * width } else { n }
+      let mut a = lo
+      let mut b = mid
+      let mut k = lo
+      while a < mid && b < hi {
+        if cmp_row_by(rows[b], rows[a], specs) < 0 {
+          tmp[k] = rows[b]
+          b = b + 1
+        } else {
+          tmp[k] = rows[a]
+          a = a + 1
+        }
+        k = k + 1
+      }
+      while a < mid {
+        tmp[k] = rows[a]
+        a = a + 1
+        k = k + 1
+      }
+      while b < hi {
+        tmp[k] = rows[b]
+        b = b + 1
+        k = k + 1
+      }
+      lo = lo + 2 * width
+    }
+    for i = 0; i < n; i = i + 1 {
+      rows[i] = tmp[i]
+    }
+    width = width * 2
+  }
+}
+
+/// 把聚合列解析为下标；rowid 返回 -1，找不到抛错
+fn resolve_order_col(t : TableDef, name : String) -> Int raise DbError {
+  let lower = name.to_lower()
+  if lower == "rowid" || lower == "_rowid_" || lower == "oid" {
+    return -1
+  }
+  match t.column_index(name) {
+    Some(i) => i
+    None => raise NotFound("ORDER BY 列不存在：\{name}")
+  }
+}
+
+/// 聚合求值：对一列的值求 SUM/AVG/MIN/MAX。
+/// 语义对齐 SQLite：忽略 NULL；SUM 全 NULL 得 NULL，AVG 同理；空集得 NULL。
+fn agg_value(kind : AggKind, rows : Array[RowData], idx : Int) -> Value {
+  match kind {
+    Sum => {
+      let mut sum_i : Int64 = Int64::from_int(0)
+      let mut sum_d : Double = 0.0
+      let mut is_real = false
+      let mut any = false
+      for r in rows {
+        let v = if idx < r.values.length() { r.values[idx] } else { VNull }
+        match v {
+          VInt(i) => {
+            any = true
+            sum_i = sum_i + i
+          }
+          VReal(d) => {
+            any = true
+            is_real = true
+            sum_d = sum_d + d
+          }
+          _ => ()
+        }
+      }
+      if !any {
+        VNull
+      } else if is_real {
+        VReal(sum_i.to_double() + sum_d)
+      } else {
+        VInt(sum_i)
       }
     }
-    rows[j + 1] = cur
+    Avg => {
+      let mut sum : Double = 0.0
+      let mut cnt = 0
+      for r in rows {
+        let v = if idx < r.values.length() { r.values[idx] } else { VNull }
+        match v {
+          VInt(i) => {
+            sum = sum + i.to_double()
+            cnt = cnt + 1
+          }
+          VReal(d) => {
+            sum = sum + d
+            cnt = cnt + 1
+          }
+          _ => ()
+        }
+      }
+      if cnt == 0 {
+        VNull
+      } else {
+        VReal(sum / cnt.to_double())
+      }
+    }
+    Min => {
+      let mut best : Value? = None
+      for r in rows {
+        let v = if idx < r.values.length() { r.values[idx] } else { VNull }
+        match v {
+          VNull => ()
+          _ =>
+            match best {
+              None => best = Some(v)
+              Some(b) =>
+                if v.compare(b) < 0 {
+                  best = Some(v)
+                }
+            }
+        }
+      }
+      match best {
+        Some(x) => x
+        None => VNull
+      }
+    }
+    Max => {
+      let mut best : Value? = None
+      for r in rows {
+        let v = if idx < r.values.length() { r.values[idx] } else { VNull }
+        match v {
+          VNull => ()
+          _ =>
+            match best {
+              None => best = Some(v)
+              Some(b) =>
+                if v.compare(b) > 0 {
+                  best = Some(v)
+                }
+            }
+        }
+      }
+      match best {
+        Some(x) => x
+        None => VNull
+      }
+    }
+    CountOne => {
+      let mut cnt = 0
+      for r in rows {
+        let v = if idx < r.values.length() { r.values[idx] } else { VNull }
+        match v {
+          VNull => ()
+          _ => cnt = cnt + 1
+        }
+      }
+      VInt(Int64::from_int(cnt))
+    }
+    CountStar => VInt(Int64::from_int(rows.length()))
+  }
+}
+
+fn agg_label(kind : AggKind, col : String) -> String {
+  match kind {
+    CountStar => "COUNT(*)"
+    CountOne => "COUNT(\{col})"
+    Sum => "SUM(\{col})"
+    Avg => "AVG(\{col})"
+    Min => "MIN(\{col})"
+    Max => "MAX(\{col})"
   }
 }
 
@@ -403,62 +806,55 @@ pub fn run_select(db : Db, q : SelectQ) -> ResultSet raise DbError {
     }
     None => ()
   }
-  // 聚合
+  // 聚合：若选择项里有聚合，则整条查询走聚合路径（单行结果）
   for it in q.items {
     match it {
-      CountStar | CountOne(_) => {
-        let label = match it {
-          CountStar => "COUNT(*)"
-          CountOne(c) => "COUNT(\{c})"
-          _ => "COUNT"
+      Agg(kind, col) => {
+        let idx = match kind {
+          CountStar => -1
+          _ => resolve_order_col(t, col)
         }
-        return { columns: [label], rows: [[VInt(Int64::from_int(rows.length()))]] }
+        let val = agg_value(kind, rows, idx)
+        return { columns: [agg_label(kind, col)], rows: [[val]] }
       }
       _ => ()
     }
   }
-  // ORDER BY
-  match q.order_col {
-    Some(col) => {
-      let lower = col.to_lower()
-      if lower == "rowid" {
-        // 按 rowid 排序
-        let n = rows.length()
-        for i = 1; i < n; i = i + 1 {
-          let cur = rows[i]
-          let mut j = i - 1
-          while j >= 0 {
-            let c = rows[j].rowid - cur.rowid
-            let should_shift = if q.order_desc { c < Int64::from_int(0) } else { c > Int64::from_int(0) }
-            if should_shift {
-              rows[j + 1] = rows[j]
-              j = j - 1
-            } else {
-              break
-            }
-          }
-          rows[j + 1] = cur
-        }
-      } else {
-        match t.column_index(col) {
-          Some(idx) => sort_rows(rows, idx, q.order_desc)
-          None => raise NotFound("ORDER BY 列不存在：\{col}")
-        }
+  // ORDER BY（支持多列）
+  if q.order.length() > 0 {
+    let specs : Array[(Int, Bool)] = []
+    for o in q.order {
+      match o {
+        OrderBy(col, desc) => specs.push((resolve_order_col(t, col), desc))
       }
     }
-    None => ()
+    sort_rows_multi(rows, specs)
   }
-  // LIMIT
+  // OFFSET + LIMIT
+  let start = match q.offset {
+    Some(o) => if o > 0 { o } else { 0 }
+    None => 0
+  }
   match q.limit {
-    Some(n) =>
-      if n >= 0 && n < rows.length() {
+    Some(n) => {
+      let trimmed : Array[RowData] = []
+      let mut i = start
+      let mut taken = 0
+      while i < rows.length() && taken < n {
+        trimmed.push(rows[i])
+        i = i + 1
+        taken = taken + 1
+      }
+      rows = trimmed
+    }
+    None =>
+      if start > 0 {
         let trimmed : Array[RowData] = []
-        for i = 0; i < n; i = i + 1 {
+        for i = start; i < rows.length(); i = i + 1 {
           trimmed.push(rows[i])
         }
         rows = trimmed
       }
-    None => ()
   }
   // 投影
   let out_cols : Array[String] = []

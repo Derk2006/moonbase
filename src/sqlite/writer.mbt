@@ -144,7 +144,26 @@ fn int_bytes(i : Int64, w : Int) -> Array[Byte] {
   out
 }
 
-fn value_serial_and_body(v : Value) -> (Int, Array[Byte]) {
+/// 按目标编码序列化文本：1=UTF-8，2=UTF-16LE，3=UTF-16BE。
+/// 返回 (serial type, body 字节)。
+fn text_serial_and_body(s : String, enc : Int) -> (Int, Array[Byte]) {
+  match enc {
+    2 => {
+      let b = @utf16.encode(s, endianness=@utf16.Endian::Little).to_array()
+      (13 + 2 * b.length(), b)
+    }
+    3 => {
+      let b = @utf16.encode(s, endianness=@utf16.Endian::Big).to_array()
+      (13 + 2 * b.length(), b)
+    }
+    _ => {
+      let b = @utf8.encode(s).to_array()
+      (13 + 2 * b.length(), b)
+    }
+  }
+}
+
+fn value_serial_and_body(v : Value, enc : Int) -> (Int, Array[Byte]) {
   match v {
     VNull => (0, [])
     VInt(i) => {
@@ -158,10 +177,7 @@ fn value_serial_and_body(v : Value) -> (Int, Array[Byte]) {
       }
     }
     VReal(d) => (7, u64_to_be8(double_to_bits(d)))
-    VText(s) => {
-      let b = @utf8.encode(s).to_array()
-      (13 + 2 * b.length(), b)
-    }
+    VText(s) => text_serial_and_body(s, enc)
     VBlob(b) => {
       let arr = b.to_array()
       (12 + 2 * arr.length(), arr)
@@ -169,12 +185,12 @@ fn value_serial_and_body(v : Value) -> (Int, Array[Byte]) {
   }
 }
 
-/// 编码一条 record（header + body）
-fn encode_record(values : Array[Value]) -> Array[Byte] {
+/// 编码一条 record（header + body），按指定文本编码序列化文本字段。
+fn encode_record(values : Array[Value], enc : Int) -> Array[Byte] {
   let serials : Array[Int] = []
   let body : Array[Byte] = []
   for v in values {
-    let (st, b) = value_serial_and_body(v)
+    let (st, b) = value_serial_and_body(v, enc)
     serials.push(st)
     for x in b {
       body.push(x)
@@ -575,7 +591,7 @@ fn pack_leaves(
 
 // ---- 数据库头 ----
 
-fn write_db_header(buf : Array[Byte], page_size : Int, page_count : Int) -> Unit {
+fn write_db_header(buf : Array[Byte], page_size : Int, page_count : Int, enc : Int) -> Unit {
   let magic = [
     83, 81, 76, 105, 116, 101, 32, 102, 111, 114, 109, 97, 116, 32, 51, 0,
   ]
@@ -598,7 +614,7 @@ fn write_db_header(buf : Array[Byte], page_size : Int, page_count : Int) -> Unit
   put_be32(buf, 44, 4)
   put_be32(buf, 48, 0)
   put_be32(buf, 52, 0)
-  put_be32(buf, 56, 1)
+  put_be32(buf, 56, enc)
   put_be32(buf, 60, 0)
   put_be32(buf, 64, 0)
   put_be32(buf, 68, 0)
@@ -620,6 +636,7 @@ pub struct IndexSpec {
   table : String
   sql : String
   columns : Array[String]
+  unique : Bool
 }
 
 /// 一张表：表名、CREATE TABLE 语句（用于 sqlite_master.sql）、行、索引
@@ -645,7 +662,18 @@ pub fn IndexSpec::new(
   sql : String,
   columns : Array[String]
 ) -> IndexSpec {
-  { name, table, sql, columns }
+  { name, table, sql, columns, unique: false }
+}
+
+/// 构造一只 UNIQUE 索引。`sql` 应形如 `CREATE UNIQUE INDEX ...`，`unique` 标志
+/// 会随 sql 一并进入 sqlite_master，读回时由 parse_index 识别为 UNIQUE。
+pub fn IndexSpec::new_unique(
+  name : String,
+  table : String,
+  sql : String,
+  columns : Array[String]
+) -> IndexSpec {
+  { name, table, sql, columns, unique: true }
 }
 
 /// 构造一张表的输入（不含索引）。
@@ -849,8 +877,33 @@ pub fn make_db_with_page_size(
   tables : Array[TableSpec],
   page_size : Int
 ) -> Bytes raise DbError {
+  make_db_with_encoding(tables, page_size, 1)
+}
+
+/// 文本编码：1=UTF-8，2=UTF-16LE，3=UTF-16BE（对应 SQLite 头部第 56 字节）。
+/// 非法值抛 `BadSql`。
+fn valid_enc(e : Int) -> Bool {
+  match e {
+    1 | 2 | 3 => true
+    _ => false
+  }
+}
+
+/// 最底层生成入口：页大小 + 文本编码都可指定。
+///
+/// 文本编码会影响 `sqlite_master` 与所有表 / 索引记录中文本字段的序列化方式
+/// （serial type 13 的正文按 UTF-8 / UTF-16LE / UTF-16BE 编码），并写入头部
+/// 第 56 字节。读侧 `decode_text` 已支持三种编码，官方 sqlite3 也能正确读回。
+pub fn make_db_with_encoding(
+  tables : Array[TableSpec],
+  page_size : Int,
+  enc : Int
+) -> Bytes raise DbError {
   if !valid_page_size(page_size) {
     raise BadSql("非法页大小：\{page_size}（须为 512..65536 之间的 2 的幂）")
+  }
+  if !valid_enc(enc) {
+    raise BadSql("非法文本编码：\{enc}（须为 1=UTF-8 / 2=UTF-16LE / 3=UTF-16BE）")
   }
   let usable = page_size
 
@@ -902,7 +955,7 @@ pub fn make_db_with_page_size(
     let cells : Array[(Int64, Array[Byte], Array[Byte]?)] = []
     for j = 0; j < rowbuf.length(); j = j + 1 {
       let (rid, vals) = rowbuf[j]
-      let rec = encode_record(vals)
+      let rec = encode_record(vals, enc)
       let (onpage, ov) = build_leaf_cell(rid, rec, usable)
       cells.push((rid, onpage, ov))
     }
@@ -939,7 +992,7 @@ pub fn make_db_with_page_size(
       sort_key_vecs(keys)
       let records : Array[Array[Byte]] = []
       for kv in keys {
-        records.push(encode_record(kv))
+        records.push(encode_record(kv, enc))
       }
       let (groups, _seps, group_max) = pack_index_leaves(page_size, usable, records)
       let root = build_index_tree(arena, page_size, usable, groups, group_max, all_pending)
@@ -959,7 +1012,7 @@ pub fn make_db_with_page_size(
       VInt(Int64::from_int(root)),
       VText(sql),
     ]
-    let rec = encode_record(vals)
+    let rec = encode_record(vals, enc)
     let (onpage, ov) = build_leaf_cell(mrid, rec, usable)
     master_cells.push((mrid, onpage, ov))
     mrid = mrid + Int64::from_int(1)
@@ -1003,7 +1056,7 @@ pub fn make_db_with_page_size(
     }
     off = off + page_size
   }
-  write_db_header(out, page_size, total_pages)
+  write_db_header(out, page_size, total_pages, enc)
   Bytes::from_array(out)
 }
 
@@ -1045,6 +1098,7 @@ pub fn make_demo_db() -> Bytes raise DbError {
           table: "users",
           sql: "CREATE INDEX idx_users_name ON users(name)",
           columns: ["name"],
+          unique: false,
         },
       ],
     },
