@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Published
+
+- **`Derk2006/moonbase@0.1.0` is on mooncakes.io** —
+  <https://mooncakes.io/docs/Derk2006/moonbase>, installable with
+  `moon add Derk2006/moonbase@0.1.0`. Two independent checks went into this
+  entry rather than trusting the upload: the registry's own build of the
+  published archive reports `build_status = success`, and the archive was then
+  consumed from a *clean* project created with `moon new` — writer, query and
+  `verify_db` all ran against the installed package, not against this working
+  copy. The local publish zip and the registry's recorded `checksum`
+  (`654926f5…`) agree, so what readers download is byte-for-byte what was
+  tested here.
+
 ### Added
 
 - **VACUUM-style compaction**: `vacuum(db, page_size)` and the CLI

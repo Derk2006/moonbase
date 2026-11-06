@@ -28,8 +28,13 @@ moon version
 
 ## 2. Install / depend on MoonBase
 
-The module name is `Derk2006/moonbase`. Add the `src/sqlite` package to your
-`moon.pkg` imports:
+The module is published on mooncakes.io as `Derk2006/moonbase` (version 0.1.0):
+
+```bash
+moon add Derk2006/moonbase@0.1.0
+```
+
+Then add the `src/sqlite` package to your `moon.pkg` imports:
 
 ```
 import {
@@ -37,7 +42,8 @@ import {
 }
 ```
 
-Then use the API through the `@sqlite` alias.
+Then use the API through the `@sqlite` alias. Working from a clone instead works
+too — nothing in the build reads the network.
 
 ## 3. Build and run the CLI
 

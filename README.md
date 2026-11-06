@@ -1,6 +1,7 @@
 # MoonBase — Pure-MoonBit SQLite File-Format Reader & Writer
 
 [![CI](https://github.com/Derk2006/moonbase/actions/workflows/ci.yml/badge.svg)](https://github.com/Derk2006/moonbase/actions/workflows/ci.yml)
+[![mooncakes](https://img.shields.io/badge/mooncakes-0.1.0-orange.svg)](https://mooncakes.io/docs/Derk2006/moonbase)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MoonBit](https://img.shields.io/badge/MoonBit-zero%20FFI-purple.svg)](https://www.moonbitlang.com/)
 
@@ -40,6 +41,7 @@ inverse of the parser and reuses it for self-verification. MoonBase is a
 | Query — `DISTINCT`, `ORDER BY … NULLS FIRST|LAST`, `COUNT(DISTINCT col)` | ✅ implemented, unit-tested |
 | VACUUM-style compaction — `vacuum` / CLI `vacuum` | ✅ implemented, freelist-free output verified by official `sqlite3` |
 | Unit tests | ✅ 59 passing (`moon test`) |
+| Published package | ✅ [`Derk2006/moonbase@0.1.0`](https://mooncakes.io/docs/Derk2006/moonbase) on mooncakes.io |
 | CI | ✅ GitHub Actions (`moon check` / `moon test` / js + wasm-gc builds) |
 | License | ✅ Apache-2.0 (`LICENSE`) |
 | Cross-backend | ✅ pure MoonBit, zero FFI (js / wasm-gc / wasm / native) |
@@ -107,6 +109,13 @@ moonbase/
 
 - GitHub (primary): https://github.com/Derk2006/moonbase
 - Gitee (mirror): https://gitee.com/EchoDerk/moonbase
+- mooncakes (package registry): https://mooncakes.io/docs/Derk2006/moonbase
+
+## Install
+
+```bash
+moon add Derk2006/moonbase@0.1.0
+```
 
 ## Quick Start
 
